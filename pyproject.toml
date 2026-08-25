@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobspy"
+version = "0.1.0"
+description = "Job scraping and AI filtering pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "JobSpy Contributors"}
+]
+keywords = ["job", "scraping", "ai", "filtering", "linkedin", "indeed", "glassdoor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/jobspy"
+Documentation = "https://github.com/yourusername/jobspy#readme"
+Repository = "https://github.com/yourusername/jobspy"
+
+[project.dependencies]
+pandas >= 1.5.0
+pyyaml >= 6.0
+python-dotenv >= 1.0.0
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 7.0",
+    "pytest-cov >= 4.0",
+    "black >= 23.0",
+    "flake8 >= 6.0",
+    "flake8-bugbear >= 24.0",
+    "mypy >= 1.0",
+    "types-PyYAML >= 6.0",
+    "types-requests >= 2.31.0",
+    "bandit >= 1.7.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+skip-string-normalization = true
+
+[tool.flake8]
+max-line-length = 127
+max-complexity = 10
+extend-ignore = [
+    "E203",  # Whitespace before ':' ignored by black
+    "W503",  # Line break before binary operator ignored by black
+]
+extend-select = [
+    "E",
+    "F",
+    "W",
+    "C90",
+]
+exclude = [
+    "__init__.py",
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".venv",
+    "tests/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = "tests"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--disable-warnings",
+    "--tb=short",
+]
+markers = [
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+    "slow: marks tests as slow running",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self\\.debug",
+    "if settings\\.DEBUG",
+    "if settings\\.TESTING",
+    "if __name__ == .__main__:",
+]
+omit = [
+    "tests/*",
+    "*/migrations/*",
+]

@@ -1,24 +1,68 @@
-experience_level_filter_prompt: |
-  You are an AI assistant that predicts the experience level of a job posting.
-  Given the job title and description, determine the experience level from the following options: {experience_levels}.
+experience_years_prompt: |
+  You are an AI assistant that estimates how many years of professional
+  experience a job posting requires. Read the job title and description and
+  infer the required years of experience.
+
+  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  {{
+    "min_years": <integer, minimum years of experience required, 0 if none stated>,
+    "max_years": <integer or null, upper bound; use null if open-ended (e.g. "5+ years")>
+  }}
 
   Job Title: {title}
   Job Description: {description}
 
-  Experience Level:
+  JSON:
 
-resume_match_prompt: |
-  You are an AI assistant that matches job postings to a candidate's resume.
-  Given the candidate's skills and a job posting, determine how well the job matches the candidate's skills.
+suitability_prompt: |
+  You are a career coach evaluating how well a candidate's resume fits a job.
 
-  Candidate Skills: {resume_skills}
+  Compare the candidate's resume against the job posting and assess the fit,
+  paying attention to required experience, skills, and domain.
+
+  Candidate Resume:
+  {resume}
 
   Job Title: {title}
-  Job Description: {description}
+  Company: {company}
+  Job Description:
+  {description}
 
-  Provide a match score between 0.0 and 1.0, where:
-  - 1.0 means the job is an excellent match for the candidate's skills
-  - 0.5 means the job is a moderate match
-  - 0.0 means the job is not a match at all
+  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  {{
+    "score": <integer 0-100, overall suitability>,
+    "verdict": "<strong | moderate | weak>",
+    "experience_match": <true or false, whether the candidate meets the required experience>,
+    "matched_skills": ["skills from the resume that the job wants"],
+    "missing_skills": ["skills the job wants that the resume lacks"],
+    "reasoning": "<2-4 sentence explanation of the score>"
+  }}
 
-  Match Score:
+resume_tailor_prompt: |
+  You are an expert resume writer. Rewrite the candidate's resume so it is
+  tailored to the target job below. Keep every claim truthful — do NOT invent
+  experience, employers, or credentials the candidate does not have. Re-order,
+  re-emphasize, and rephrase existing content to surface the most relevant
+  skills and achievements, and mirror the language of the job description where
+  it is genuinely applicable.
+
+  Candidate Resume:
+  {resume}
+
+  Target Job Title: {title}
+  Company: {company}
+  Job Description:
+  {description}
+
+  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  {{
+    "name": "<candidate full name, or empty string if unknown>",
+    "contact": "<single line of contact info: email / phone / location / links>",
+    "summary": "<2-3 sentence professional summary tailored to this job>",
+    "sections": [
+      {{
+        "heading": "<section title, e.g. Experience, Skills, Education, Projects>",
+        "bullets": ["<concise bullet point>", "<another bullet point>"]
+      }}
+    ]
+  }}

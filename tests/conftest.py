@@ -1,7 +1,16 @@
 """Shared test fixtures for jobspy test suite."""
 import json
-import pytest
+import sys
 from pathlib import Path
+
+import pytest
+
+# Make both import roots available: `Agent.*`/`pipeline.*`/`scraper.*` (src on
+# path) and `src.*` (project root on path).
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+for _path in (PROJECT_ROOT, PROJECT_ROOT / "src"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 
 @pytest.fixture

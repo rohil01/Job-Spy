@@ -1,8 +1,16 @@
 """
 Job scraper module using jobsniffer for scraping job postings.
+
+Exposes two low-level functions (``scrape_jobs_from_sites`` /
+``scrape_jobs_simple``) and a high-level ``JobScraper`` class that is driven by
+the project ``config.py`` and saves its results to JSON.
 """
 
-from typing import List, Union, Optional
+import json
+import importlib.util
+from pathlib import Path
+from typing import List, Union, Optional, Dict, Any
+
 import pandas as pd
 
 try:
@@ -131,8 +139,128 @@ def scrape_jobs_simple(
     )
 
 
+def _load_project_config() -> Dict[str, Any]:
+    """Load settings from the root ``config.py`` via ``load_config()``.
+
+    Uses importlib directly so it works regardless of how the package was
+    imported (``scraper.scraper`` or ``src.scraper.scraper``).
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    config_path = project_root / "config.py"
+    spec = importlib.util.spec_from_file_location("jobspy_config", config_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise ImportError(f"Could not load config from {config_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_config()
+
+
+class JobScraper:
+    """Config-driven job scraper.
+
+    Reads settings from the root ``config.py`` (or an override dict passed to
+    the constructor), scrapes every configured search term across every
+    configured site, deduplicates the merged results, and can save them to
+    JSON. This is the entry point used by the pipeline and the FastAPI backend.
+
+    Example:
+        >>> scraper = JobScraper()
+        >>> jobs = scraper.scrape_and_save()
+        >>> print(len(jobs))
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config if config is not None else _load_project_config()
+        # Lazy imports keep the module importable even without the src path set.
+        from pipeline.utils import setup_logger
+        self.logger = setup_logger("scraper")
+
+    def scrape(self, progress_callback=None) -> List[Dict[str, Any]]:
+        """Scrape all configured terms/sites and return deduplicated jobs.
+
+        ``progress_callback(completed, total, message)`` (optional) is called as
+        each search term is processed so callers can render a progress bar.
+        """
+        from pipeline.utils import cooldown_sleep, deduplicate_jobs
+
+        sites = self.config.get("sites", [])
+        search_terms = self.config.get("search_terms", [])
+        location = self.config.get("location", "")
+        cooldown_minutes = self.config.get("scrape_cooldown_minutes", 0)
+
+        # Only forward parameters that jobsniffer actually accepts.
+        scraper_params = {
+            "results_wanted": self.config.get("results_wanted", 15),
+            "hours_old": self.config.get("hours_old", 72),
+            "country_indeed": self.config.get("country_indeed", "usa"),
+            "linkedin_fetch_description": self.config.get(
+                "linkedin_fetch_description", False
+            ),
+        }
+
+        total = len(search_terms)
+
+        def _report(completed: int, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(completed, total, message)
+
+        all_jobs: List[Dict[str, Any]] = []
+        for index, term in enumerate(search_terms):
+            _report(index, f"Scraping '{term}' ({index + 1}/{total})")
+            self.logger.info(f"Scraping '{term}' across {sites}")
+            try:
+                df = scrape_jobs_from_sites(
+                    site_name=sites,
+                    search_term=term,
+                    location=location,
+                    **scraper_params,
+                )
+                if df is not None and not df.empty:
+                    jobs = df.to_dict("records")
+                    self.logger.info(f"Retrieved {len(jobs)} jobs for '{term}'")
+                    all_jobs.extend(jobs)
+                    _report(index + 1, f"Found {len(jobs)} jobs for '{term}' ({index + 1}/{total})")
+                else:
+                    self.logger.warning(f"No jobs returned for '{term}'")
+                    _report(index + 1, f"No jobs for '{term}' ({index + 1}/{total})")
+            except Exception as exc:  # noqa: BLE001 - log and continue other terms
+                self.logger.error(f"Error scraping '{term}': {exc}", exc_info=True)
+                _report(index + 1, f"Error on '{term}' ({index + 1}/{total})")
+
+            # Cooldown between terms (never after the last one).
+            if cooldown_minutes and index < total - 1:
+                _report(index + 1, f"Cooling down {cooldown_minutes:g} min before next term…")
+                cooldown_sleep(cooldown_minutes, self.logger)
+
+        unique_jobs = deduplicate_jobs(all_jobs)
+        self.logger.info(
+            f"{len(all_jobs)} jobs scraped -> {len(unique_jobs)} after dedup"
+        )
+        return unique_jobs
+
+    def scrape_and_save(
+        self, output_path: Optional[Union[str, Path]] = None, progress_callback=None
+    ) -> List[Dict[str, Any]]:
+        """Scrape jobs and write them to ``output_path`` (or the config path)."""
+        from pipeline.utils import make_json_safe
+
+        jobs = self.scrape(progress_callback=progress_callback)
+        path = Path(output_path) if output_path else self._default_output_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as output_file:
+            json.dump(make_json_safe(jobs), output_file, ensure_ascii=False, indent=2)
+        self.logger.info(f"Saved {len(jobs)} jobs to {path}")
+        return jobs
+
+    def _default_output_path(self) -> Path:
+        project_root = Path(__file__).resolve().parents[2]
+        return project_root / self.config.get(
+            "scraped_jobs_path", "data/scraped_jobs.json"
+        )
+
+
 # For backward compatibility or direct export
-__all__ = ["scrape_jobs_from_sites", "scrape_jobs_simple"]
+__all__ = ["scrape_jobs_from_sites", "scrape_jobs_simple", "JobScraper"]
 
 
 if __name__ == "__main__":

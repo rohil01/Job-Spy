@@ -1,8 +1,29 @@
 """Unit tests for the job scraper module."""
+import json
 from unittest.mock import Mock, patch
 import pytest
 import pandas as pd
-from src.scraper.scraper import scrape_jobs_from_sites, scrape_jobs_simple
+from src.scraper.scraper import scrape_jobs_from_sites, scrape_jobs_simple, JobScraper
+
+
+def _mock_df(records):
+    df = Mock()
+    df.empty = len(records) == 0
+    df.to_dict.return_value = records
+    return df
+
+
+_SCRAPER_CONFIG = {
+    "sites": ["indeed"],
+    "search_terms": ["term-a", "term-b"],
+    "location": "Bengaluru",
+    "results_wanted": 5,
+    "hours_old": 6,
+    "country_indeed": "india",
+    "linkedin_fetch_description": False,
+    "scrape_cooldown_minutes": 0,
+    "scraped_jobs_path": "data/scraped_jobs.json",
+}
 
 
 class TestScraper:
@@ -132,3 +153,106 @@ class TestScraper:
         assert 'location' in params
         assert 'results_wanted' in params
         assert params['results_wanted'].default == 10
+
+
+class TestJobScraper:
+    """Tests for the config-driven JobScraper class."""
+
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_iterates_terms_and_dedups(self, mock_scrape):
+        # Both terms return the same job_url -> should dedupe to one.
+        mock_scrape.side_effect = [
+            _mock_df([{"job_url": "u1", "title": "A"}]),
+            _mock_df([{"job_url": "u1", "title": "A"}, {"job_url": "u2", "title": "B"}]),
+        ]
+        scraper = JobScraper(config=dict(_SCRAPER_CONFIG))
+        jobs = scraper.scrape()
+
+        assert mock_scrape.call_count == 2
+        # Forwarded params come from config.
+        _, kwargs = mock_scrape.call_args_list[0]
+        assert kwargs["site_name"] == ["indeed"]
+        assert kwargs["results_wanted"] == 5
+        assert kwargs["hours_old"] == 6
+        # u1 deduplicated across the two terms.
+        assert len(jobs) == 2
+
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_survives_a_failing_term(self, mock_scrape):
+        mock_scrape.side_effect = [
+            RuntimeError("boom"),
+            _mock_df([{"job_url": "u2", "title": "B"}]),
+        ]
+        scraper = JobScraper(config=dict(_SCRAPER_CONFIG))
+        jobs = scraper.scrape()
+        assert len(jobs) == 1  # first term failed, second succeeded
+
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_and_save_writes_json(self, mock_scrape, tmp_path):
+        mock_scrape.side_effect = [
+            _mock_df([{"job_url": "u1", "title": "A"}]),
+            _mock_df([{"job_url": "u2", "title": "B"}]),
+        ]
+        out = tmp_path / "jobs.json"
+        scraper = JobScraper(config=dict(_SCRAPER_CONFIG))
+        jobs = scraper.scrape_and_save(output_path=out)
+
+        assert out.exists()
+        saved = json.loads(out.read_text(encoding="utf-8"))
+        assert len(saved) == len(jobs) == 2
+
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_reports_progress_per_term(self, mock_scrape):
+        mock_scrape.side_effect = [
+            _mock_df([{"job_url": "u1", "title": "A"}]),
+            _mock_df([{"job_url": "u2", "title": "B"}]),
+        ]
+        calls = []
+        scraper = JobScraper(config=dict(_SCRAPER_CONFIG))
+        scraper.scrape(progress_callback=lambda done, total, msg: calls.append((done, total)))
+
+        # total is always the number of search terms (2); completion reaches 2/2.
+        assert all(total == 2 for _, total in calls)
+        assert calls[-1] == (2, 2)
+        assert (0, 2) in calls  # reported before the first term, too
+
+    @patch('pipeline.utils.cooldown_sleep')
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_cooldown_runs_between_terms_only(self, mock_scrape, mock_cooldown):
+        mock_scrape.side_effect = [
+            _mock_df([{"job_url": "u1"}]),
+            _mock_df([{"job_url": "u2"}]),
+        ]
+        config = dict(_SCRAPER_CONFIG, scrape_cooldown_minutes=0.5)
+        JobScraper(config=config).scrape()
+
+        # Two terms -> exactly one cooldown (never after the last term).
+        mock_cooldown.assert_called_once()
+        assert mock_cooldown.call_args.args[0] == 0.5
+
+    @patch('pipeline.utils.cooldown_sleep')
+    @patch('src.scraper.scraper.scrape_jobs_from_sites')
+    def test_scrape_zero_cooldown_never_sleeps(self, mock_scrape, mock_cooldown):
+        mock_scrape.side_effect = [_mock_df([{"job_url": "u1"}]), _mock_df([{"job_url": "u2"}])]
+        JobScraper(config=dict(_SCRAPER_CONFIG)).scrape()  # cooldown is 0
+        mock_cooldown.assert_not_called()
+
+
+class TestCooldownSleep:
+    """The cooldown helper must accept fractional minutes (0.5 = 30s)."""
+
+    @patch('pipeline.utils.time.sleep')
+    def test_fractional_minutes_convert_to_seconds(self, mock_sleep):
+        import logging
+        from pipeline.utils import cooldown_sleep
+
+        cooldown_sleep(0.5, logging.getLogger("test"))
+        mock_sleep.assert_called_once_with(30.0)
+
+    @patch('pipeline.utils.time.sleep')
+    def test_zero_is_a_noop(self, mock_sleep):
+        import logging
+        from pipeline.utils import cooldown_sleep
+
+        cooldown_sleep(0, logging.getLogger("test"))
+        mock_sleep.assert_not_called()

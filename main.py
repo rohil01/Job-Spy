@@ -1,30 +1,32 @@
-"""Run the complete job scraping and AI filtering pipeline."""
+"""Run the complete job scraping + AI experience-filter pipeline (CLI path).
+
+For the HTTP API, use ``run_api.py`` instead.
+"""
 
 import sys
 from pathlib import Path
 
-import yaml
-
 PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+for _path in (PROJECT_ROOT, PROJECT_ROOT / "src"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
-from pipeline.ai_filter_step import run_ai_filter
-from pipeline.scraper_runner import scrape_pipeline
+import config  # noqa: E402
+from pipeline.ai_filter_step import run_ai_filter  # noqa: E402
+from pipeline.scraper_runner import scrape_pipeline  # noqa: E402
 
 
 def main() -> None:
-    """Scrape jobs, filter them with AI, and write both result files."""
-    config_path = PROJECT_ROOT / "src" / "pipeline" / "config.yaml"
-    with config_path.open("r", encoding="utf-8") as config_file:
-        config = yaml.safe_load(config_file) or {}
+    """Scrape jobs (per config.py), filter by experience, write both JSON files."""
+    settings = config.load_config()
 
     jobs = scrape_pipeline()
-    output_path = PROJECT_ROOT / config.get(
-        "ai_output_json_path", "data/filtered_jobs.json"
-    )
+
+    output_path = PROJECT_ROOT / "data" / "filtered_jobs.json"
     run_ai_filter(
         jobs,
-        config.get("experience_levels", []),
+        settings.get("experience_min_years", 0),
+        settings.get("experience_max_years"),
         output_path,
     )
 

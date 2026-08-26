@@ -1,5 +1,4 @@
 import time
-import random
 import logging
 from datetime import date, datetime, time as time_obj
 from decimal import Decimal
@@ -33,10 +32,16 @@ def setup_logger(name: str = "pipeline") -> logging.Logger:
     return logger
 
 
-def random_backoff(min_min: int, max_min: int, logger: logging.Logger) -> None:
-    """Sleep for a random duration between min_min and max_min minutes."""
-    seconds = random.randint(min_min * 60, max_min * 60)
-    logger.info(f"Backing off for {seconds // 60} minute(s) {seconds % 60} second(s)")
+def cooldown_sleep(minutes: float, logger: logging.Logger) -> None:
+    """Pause for ``minutes`` minutes between scrape passes.
+
+    Accepts fractional minutes so short cooldowns are possible: ``0.5`` sleeps
+    for 30 seconds. Non-positive values are a no-op.
+    """
+    seconds = max(0.0, float(minutes) * 60.0)
+    if seconds <= 0:
+        return
+    logger.info(f"Cooling down for {int(seconds // 60)}m {int(seconds % 60)}s…")
     time.sleep(seconds)
 
 

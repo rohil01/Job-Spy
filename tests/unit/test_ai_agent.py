@@ -1,233 +1,174 @@
-"""Unit tests for AIJobAgent."""
-import os
-from unittest.mock import Mock, patch, MagicMock
+"""Unit tests for the rewritten AIJobAgent (experience / suitability / tailor)."""
+from unittest.mock import Mock, patch
+
 import pytest
+
 from Agent.ai_job_agent import AIJobAgent
 
 
-class TestAIJobAgent:
-    """Test cases for AIJobAgent."""
+def _make_response(content: str) -> Mock:
+    response = Mock()
+    response.choices = [Mock()]
+    response.choices[0].message.content = content
+    return response
 
-    def test_init_without_config(self):
-        """Test initialization without config."""
-        with patch('Agent.ai_job_agent.load_dotenv'), \
-             patch('Agent.ai_job_agent.Path') as mock_path:
-            # Mock the path resolution
-            mock_path_instance = Mock()
-            mock_path_instance.__truediv__ = Mock(return_value=Mock())
-            mock_path_instance.__truediv__.resolve.return_value = Mock()
-            mock_path.return_value = mock_path_instance
 
-            agent = AIJobAgent()
-            assert agent is not None
+def _agent_with_replies(*contents: str) -> AIJobAgent:
+    """Agent whose chat client returns the given contents in order."""
+    agent = AIJobAgent({'ai_provider': None})  # no real client created
+    agent.ai_model = 'test-model'
+    client = Mock()
+    client.chat.completions.create.side_effect = [_make_response(c) for c in contents]
+    agent._ai_client = client
+    return agent
+
+
+class TestInit:
+    def test_init_does_not_crash_without_ai(self):
+        """Regression: __init__ used to read self.api_key before assigning it."""
+        agent = AIJobAgent({'ai_provider': None})
+        assert agent._ai_client is None
 
     def test_init_with_config(self):
-        """Test initialization with config."""
-        config = {'ai_provider': 'openai', 'ai_model': 'gpt-4'}
-        agent = AIJobAgent(config=config)
-        assert agent.ai_provider == 'openai'
+        agent = AIJobAgent({'ai_provider': None, 'ai_model': 'gpt-4'})
         assert agent.ai_model == 'gpt-4'
 
-    def test_load_default_config_file_exists(self):
-        """Test _load_default_config when config.py exists."""
-        # This test would require mocking file system and importlib
-        # For now, we'll test the method exists and returns a dict
-        agent = AIJobAgent()
+    def test_load_default_config_returns_dict(self):
+        agent = AIJobAgent({'ai_provider': None})
         result = agent._load_default_config()
         assert isinstance(result, dict)
+        assert 'ai_model' in result  # comes from config.load_config()
 
-    def test_filter_by_experience_level_no_levels(self):
-        """Test filtering with empty experience levels."""
-        agent = AIJobAgent({'ai_provider': None})
-        jobs = [{'title': 'Test Job', 'description': 'Test Description'}]
-        result = agent.filter_by_experience_level(jobs, [])
-        assert result == jobs  # Should return all jobs when no levels specified
-
-    def test_filter_by_experience_level_no_ai_client(self):
-        """Test filtering when AI client is not available."""
-        agent = AIJobAgent({'ai_provider': None})  # No AI provider
-        jobs = [{'title': 'Test Job', 'description': 'Test Description', 'experience_level': 'Entry level'}]
-
-        with pytest.raises(RuntimeError, match='An initialized AI client is required for experience filtering'):
-            agent.filter_by_experience_level(jobs, ['Entry level'])
-
-    def test_filter_by_experience_level_with_mock_ai(self):
-        """Test filtering with mocked AI client."""
-        # Mock the AI client and its response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = 'mid-senior level'
-
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
-
-        agent = AIJobAgent({'ai_provider': 'openai', 'ai_model': 'gpt-4'})
-        agent._ai_client = mock_client
-
-        jobs = [
-            {
-                'title': 'Software Engineer',
-                'description': 'Looking for experienced developer',
-                'experience_level': 'Mid-Senior level'
-            }
-        ]
-
-        result = agent.filter_by_experience_level(jobs, ['Mid-Senior level', 'Entry level'])
-        assert len(result) == 1
-        assert result[0]['title'] == 'Software Engineer'
-
-    def test_match_resume_no_skills(self):
-        """Test resume matching with empty skills."""
-        agent = AIJobAgent({'ai_provider': None})
-        jobs = [{'title': 'Test Job', 'description': 'Test Description'}]
-        result = agent.match_resume(jobs, [])
-        assert result == jobs  # Should return all jobs when no skills specified
-
-    def test_match_resume_fallback_to_string_matching(self):
-        """Test resume matching falls back to string matching when AI not available."""
-        agent = AIJobAgent({'ai_provider': None})  # No AI provider
-
-        jobs = [
-            {
-                'title': 'Software Engineer',
-                'description': 'We need a Python developer with Django experience',
-                'skills': ['Python', 'Django']
-            },
-            {
-                'title': 'Data Scientist',
-                'description': 'Looking for ML expert with Python and TensorFlow',
-                'skills': ['Python', 'TensorFlow', 'Machine Learning']
-            }
-        ]
-
-        resume_skills = ['Python', 'Django']
-        result = agent.match_resume(jobs, resume_skills)
-
-        # Should match the first job (has both Python and Django)
-        assert len(result) == 1
-        assert result[0]['title'] == 'Software Engineer'
-
-    def test_match_resume_string_matching(self):
-        """Test the string matching helper method."""
-        # We need to test the _match_resume_string method indirectly
-        # since it's private, we'll test through match_resume when AI is disabled
-
-        agent = AIJobAgent({'ai_provider': None})
-
-        jobs = [
-            {
-                'title': 'Python Developer',
-                'description': 'Excellent opportunity for Python expert',
-                'skills': ['Python', 'Django', 'AWS']
-            },
-            {
-                'title': 'Java Developer',
-                'description': 'Java Spring backend position',
-                'skills': ['Java', 'Spring', 'Hibernate']
-            }
-        ]
-
-        # Test exact skill match
-        resume_skills = ['Python', 'Django']
-        result = agent.match_resume(jobs, resume_skills)
-        assert len(result) == 1
-        assert result[0]['title'] == 'Python Developer'
-
-        # Test partial skill match
-        resume_skills = ['Python', 'AWS']
-        result = agent.match_resume(jobs, resume_skills)
-        assert len(result) == 1  # Should still match the Python Developer job
-
-        # Test no skill match
-        resume_skills = ['Java', 'Spring']
-        result = agent.match_resume(jobs, resume_skills)
-        assert len(result) == 1  # Should match the Java Developer job
-
-        # Test no matches
-        resume_skills = ['Ruby on Rails']
-        result = agent.match_resume(jobs, resume_skills)
-        assert len(result) == 0  # No jobs match Ruby on Rails
-
-    @patch('Agent.ai_job_agent.openai')
-    def test_initialize_openai_client(self, mock_openai):
-        """Test OpenAI client initialization."""
-        mock_client = Mock()
-        mock_openai.OpenAI.return_value = mock_client
-
-        agent = AIJobAgent({
-            'ai_provider': 'openai',
-            'ai_model': 'gpt-4',
-            'api_key': 'test-key'
-        })
-
-        # Check that OpenAI client was initialized
-        mock_openai.OpenAI.assert_called_once_with(api_key='test-key')
-        assert agent._ai_client == mock_client
-
-    @patch('Agent.ai_job_agent.openai')
+    @patch('openai.OpenAI')
     def test_initialize_nvidia_client(self, mock_openai):
-        """Test NVIDIA client initialization."""
-        mock_client = Mock()
-        mock_openai.OpenAI.return_value = mock_client
-
+        mock_openai.return_value = Mock()
         agent = AIJobAgent({
             'ai_provider': 'nvidia',
-            'ai_model': 'some-model',
-            'api_key': 'test-key',
-            'base_url': 'https://custom.endpoint.com'
+            'ai_model': 'm',
+            'api_key': 'key',
+            'ai_base_url': 'https://custom/v1',
         })
+        mock_openai.assert_called_once_with(api_key='key', base_url='https://custom/v1')
+        assert agent._ai_client is not None
 
-        # Check that OpenAI client was initialized with custom base URL
-        mock_openai.OpenAI.assert_called_once_with(
-            api_key='test-key',
-            base_url='https://custom.endpoint.com'
-        )
-        assert agent._ai_client == mock_client
-
-    def test_initialize_ai_client_failure(self):
-        """Test AI client initialization failure falls back gracefully."""
-        with patch('Agent.ai_job_agent.openai') as mock_openai:
-            mock_openai.OpenAI.side_effect = Exception("API key invalid")
-
-            agent = AIJobAgent({
-                'ai_provider': 'openai',
-                'ai_model': 'gpt-4',
-                'api_key': 'invalid-key'
-            })
-
-            # Should fall back to None client
+    def test_initialize_client_failure_falls_back_to_none(self):
+        with patch('openai.OpenAI', side_effect=Exception('bad key')):
+            agent = AIJobAgent({'ai_provider': 'openai', 'ai_model': 'm', 'api_key': 'x'})
             assert agent._ai_client is None
 
-    def test_is_embedding_model_false_when_no_client(self):
-        """Test _is_embedding_model returns False when no AI client."""
+
+class TestExperienceFilter:
+    def test_none_window_returns_all(self):
         agent = AIJobAgent({'ai_provider': None})
-        # This would test the private method, but we can test through match_resume
-        # When AI client is None, it should fall back to string matching
-        jobs = [{'title': 'Test Job', 'description': 'Test Description'}]
-        result = agent.match_resume(jobs, ['Python'])
-        assert len(result) == 1  # Should work via fallback
+        jobs = [{'title': 'X', 'description': 'Y'}]
+        assert agent.filter_by_experience_years(jobs, None, None) == jobs
 
-    def test_get_embedding_not_implemented(self):
-        """Test that _get_embedding method needs to be implemented."""
-        # This test documents that the method is missing and needs implementation
-        agent = AIJobAgent()
-        # The method doesn't exist yet, which is the issue we need to fix
-        assert not hasattr(agent, '_get_embedding')
+    def test_requires_client_when_window_given(self):
+        agent = AIJobAgent({'ai_provider': None})
+        with pytest.raises(RuntimeError, match='AI client is required'):
+            agent.filter_by_experience_years([{'title': 'X'}], 0, 3)
 
-    def test_get_embeddings_not_implemented(self):
-        """Test that _get_embeddings method needs to be implemented."""
-        agent = AIJobAgent()
-        assert not hasattr(agent, '_get_embeddings')
+    def test_keeps_job_in_window(self):
+        agent = _agent_with_replies('{"min_years": 1, "max_years": 3}')
+        jobs = [{'title': 'Software Engineer', 'description': '2+ years'}]
+        result = agent.filter_by_experience_years(jobs, 0, 3)
+        assert len(result) == 1
 
-    def test_cosine_similarity_not_implemented(self):
-        """Test that _cosine_similarity method needs to be implemented."""
-        agent = AIJobAgent()
-        assert not hasattr(agent, '_cosine_similarity')
+    def test_excludes_job_above_window(self):
+        agent = _agent_with_replies('{"min_years": 8, "max_years": 12}')
+        jobs = [{'title': 'Principal Engineer', 'description': 'Senior leader'}]
+        result = agent.filter_by_experience_years(jobs, 0, 3)
+        assert result == []
 
-    def test_match_resume_string_not_implemented(self):
-        """Test that _match_resume_string method needs to be implemented."""
-        agent = AIJobAgent()
-        assert not hasattr(agent, '_match_resume_string')
+    def test_open_ended_user_max_keeps_senior(self):
+        # User window "5+" (max=None) keeps a role wanting 6-8 years.
+        agent = _agent_with_replies('{"min_years": 6, "max_years": 8}')
+        jobs = [{'title': 'Staff Engineer', 'description': 'Very senior'}]
+        result = agent.filter_by_experience_years(jobs, 5, None)
+        assert len(result) == 1
+
+    def test_job_open_ended_max_kept_when_min_in_window(self):
+        # Job wants "2+ years" (max=None); user window 0-3 => kept.
+        agent = _agent_with_replies('{"min_years": 2, "max_years": null}')
+        jobs = [{'title': 'Dev', 'description': '2+ years'}]
+        result = agent.filter_by_experience_years(jobs, 0, 3)
+        assert len(result) == 1
+        assert result[0]['required_years'] == {'min': 2, 'max': None}
+
+    def test_job_min_above_user_max_excluded(self):
+        # Job wants "5+ years"; user window 0-3 => excluded.
+        agent = _agent_with_replies('{"min_years": 5, "max_years": null}')
+        jobs = [{'title': 'Senior', 'description': '5+ years'}]
+        assert agent.filter_by_experience_years(jobs, 0, 3) == []
+
+    def test_attaches_required_years_without_mutating_input(self):
+        agent = _agent_with_replies('{"min_years": 2, "max_years": 4}')
+        jobs = [{'id': '1', 'title': 'Dev', 'description': '...'}]
+        result = agent.filter_by_experience_years(jobs, 0, 5)
+        assert result[0]['required_years'] == {'min': 2, 'max': 4}
+        assert 'required_years' not in jobs[0]  # original dict untouched
+
+    def test_drops_unparseable_estimate(self):
+        agent = _agent_with_replies('sorry, cannot tell')
+        jobs = [{'title': 'Mystery', 'description': '...'}]
+        assert agent.filter_by_experience_years(jobs, 0, 10) == []
+
+
+class TestSuitability:
+    def test_parses_json(self):
+        payload = (
+            '{"score": 82, "verdict": "strong", "experience_match": true, '
+            '"matched_skills": ["Python"], "missing_skills": ["Go"], '
+            '"reasoning": "Good fit."}'
+        )
+        agent = _agent_with_replies(payload)
+        result = agent.assess_suitability({'title': 'Dev', 'description': '...'}, 'resume')
+        assert result['score'] == 82
+        assert result['verdict'] == 'strong'
+        assert result['experience_match'] is True
+        assert result['matched_skills'] == ['Python']
+
+    def test_parses_json_in_code_fence(self):
+        payload = '```json\n{"score": 50, "verdict": "moderate"}\n```'
+        agent = _agent_with_replies(payload)
+        result = agent.assess_suitability({'title': 'Dev'}, 'resume')
+        assert result['score'] == 50
+        assert result['verdict'] == 'moderate'
+
+    def test_degrades_on_non_json(self):
+        agent = _agent_with_replies('Sorry, I cannot comply.')
+        result = agent.assess_suitability({'title': 'Dev'}, 'resume')
+        assert result['verdict'] == 'unknown'
+        assert result['reasoning'] == 'Sorry, I cannot comply.'
+
+
+class TestTailorResume:
+    def test_parses_json(self):
+        payload = (
+            '{"name": "Ada", "contact": "ada@x.com", "summary": "Engineer", '
+            '"sections": [{"heading": "Skills", "bullets": ["Python"]}]}'
+        )
+        agent = _agent_with_replies(payload)
+        result = agent.tailor_resume('resume', {'title': 'Dev', 'description': '...'})
+        assert result['name'] == 'Ada'
+        assert result['sections'][0]['heading'] == 'Skills'
+
+    def test_degrades_on_non_json(self):
+        agent = _agent_with_replies('here is your resume, plain text')
+        result = agent.tailor_resume('resume', {'title': 'Dev'})
+        # Preserves model text in a section so a document can still be built.
+        assert result['sections']
+        assert 'plain text' in result['sections'][0]['bullets'][0]
+
+
+class TestExtractJson:
+    def test_prose_wrapped(self):
+        data = AIJobAgent._extract_json('Here you go: {"a": 1} thanks')
+        assert data == {'a': 1}
+
+    def test_raises_when_no_json(self):
+        with pytest.raises(ValueError):
+            AIJobAgent._extract_json('no json here')
 
 
 if __name__ == '__main__':

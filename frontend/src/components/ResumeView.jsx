@@ -1,27 +1,10 @@
 import { useState } from 'react'
-import { assessSuitability, tailorResume, downloadBlob } from '../api.js'
+import { tailorResume, downloadBlob } from '../api.js'
 import Spinner from './Spinner.jsx'
 import ErrorBanner from './ErrorBanner.jsx'
 
-function verdictClass(verdict) {
-  const v = (verdict || '').toLowerCase()
-  if (v.includes('strong')) return 'verdict verdict--strong'
-  if (v.includes('good') || v.includes('moderate')) return 'verdict verdict--mid'
-  if (v.includes('weak') || v.includes('poor')) return 'verdict verdict--low'
-  return 'verdict'
-}
-
-function scoreClass(score) {
-  if (typeof score !== 'number') return 'score'
-  if (score >= 75) return 'score score--high'
-  if (score >= 50) return 'score score--mid'
-  return 'score score--low'
-}
-
 export default function ResumeView({ resume, setResume, jobs, selectedJob, setSelectedJob }) {
-  const [assessing, setAssessing] = useState(false)
   const [rewriting, setRewriting] = useState(false)
-  const [assessment, setAssessment] = useState(null)
   const [error, setError] = useState(null)
   const [jobJsonText, setJobJsonText] = useState('')
 
@@ -48,7 +31,7 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
 
   function validate() {
     if (!resume) {
-      setError(new Error('Upload a .docx resume first.'))
+      setError(new Error('Upload a .docx résumé first.'))
       return null
     }
     let job
@@ -59,26 +42,10 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
       return null
     }
     if (!job) {
-      setError(new Error('Select a job (from the Jobs tab) or paste a job JSON.'))
+      setError(new Error('Pick a job (from the Screen or Jobs tab) or paste a job JSON.'))
       return null
     }
     return job
-  }
-
-  async function doAssess() {
-    setError(null)
-    setAssessment(null)
-    const job = validate()
-    if (!job) return
-    setAssessing(true)
-    try {
-      const data = await assessSuitability(resume, job)
-      setAssessment(data)
-    } catch (e) {
-      setError(e)
-    } finally {
-      setAssessing(false)
-    }
   }
 
   async function doRewrite() {
@@ -97,20 +64,20 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
   }
 
   const hint =
-    error?.status === 502
+    error?.status === 502 || error?.status === 503
       ? 'The AI request failed (often a missing/invalid key). Set a real NVIDIA_API_KEY in the backend .env and restart run_api.py.'
       : null
 
   return (
     <section>
       <div className="panel">
-        <h3 className="panel__title">1 · Your resume</h3>
+        <h3 className="panel__title">1 · Your résumé</h3>
         <input type="file" accept=".docx" onChange={onFile} />
         <div>
           {resume ? (
             <span className="muted small">Loaded: {resume.name}</span>
           ) : (
-            <span className="muted small">Only .docx is supported.</span>
+            <span className="muted small">Only .docx is supported. Shared with the Screen tab.</span>
           )}
         </div>
       </div>
@@ -135,7 +102,7 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
                 ))}
               </select>
             ) : (
-              <p className="muted small">Tip: load jobs in the Jobs tab and click “Use for resume”.</p>
+              <p className="muted small">Tip: screen jobs in the Screen tab and click “Rewrite →”.</p>
             )}
             <details className="paste">
               <summary>…or paste a job JSON</summary>
@@ -152,11 +119,12 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
       </div>
 
       <div className="panel">
-        <h3 className="panel__title">3 · Act</h3>
+        <h3 className="panel__title">3 · Rewrite</h3>
+        <p className="muted small">
+          Tailors your résumé to the target job — truthfully re-ordering and rephrasing your own
+          content — and downloads it as a .docx.
+        </p>
         <div className="actions">
-          <button className="btn" onClick={doAssess} disabled={assessing}>
-            {assessing ? <Spinner label="Assessing…" /> : 'Assess suitability'}
-          </button>
           <button className="btn btn--primary" onClick={doRewrite} disabled={rewriting}>
             {rewriting ? <Spinner label="Rewriting…" /> : 'Rewrite & download .docx'}
           </button>
@@ -164,54 +132,6 @@ export default function ResumeView({ resume, setResume, jobs, selectedJob, setSe
       </div>
 
       <ErrorBanner error={error} hint={hint} />
-
-      {assessment ? (
-        <div className="assessment">
-          <div className="assessment__head">
-            <div className={scoreClass(assessment.score)}>
-              <span className="score__num">{assessment.score ?? '—'}</span>
-              <span className="score__lbl">/ 100</span>
-            </div>
-            <div>
-              <span className={verdictClass(assessment.verdict)}>{assessment.verdict}</span>
-              {assessment.experience_match != null ? (
-                <span className={`exp ${assessment.experience_match ? 'exp--ok' : 'exp--no'}`}>
-                  {assessment.experience_match ? 'experience matches' : 'experience mismatch'}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          {assessment.matched_skills?.length ? (
-            <div className="skillset">
-              <h4>Matched skills</h4>
-              <div className="chips">
-                {assessment.matched_skills.map((s, i) => (
-                  <span key={i} className="chip chip--ok">{s}</span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {assessment.missing_skills?.length ? (
-            <div className="skillset">
-              <h4>Missing skills</h4>
-              <div className="chips">
-                {assessment.missing_skills.map((s, i) => (
-                  <span key={i} className="chip chip--miss">{s}</span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {assessment.reasoning ? (
-            <div className="reasoning">
-              <h4>Reasoning</h4>
-              <p>{assessment.reasoning}</p>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
     </section>
   )
 }

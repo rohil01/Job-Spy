@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { getJobs, startScrape, getScrapeStatus, getScrapeConfig } from '../api.js'
+import { getGroupedJobs, streamScrape, getScrapeConfig } from '../api.js'
 import JobCard from './JobCard.jsx'
+import ProgressBar from './ProgressBar.jsx'
 import Spinner from './Spinner.jsx'
 import ErrorBanner from './ErrorBanner.jsx'
 
@@ -27,7 +28,7 @@ const EMPTY_FORM = {
   scrape_cooldown_minutes: '',
 }
 
-export default function JobsView({ jobs, setJobs, selectedJob, onUseJob }) {
+export default function JobsView({ groups, setGroups }) {
   const [loading, setLoading] = useState(false)
   const [scraping, setScraping] = useState(false)
   const [error, setError] = useState(null)
@@ -94,12 +95,21 @@ export default function JobsView({ jobs, setJobs, selectedJob, onUseJob }) {
     return p
   }
 
+  // Merge streamed group deltas into state, keyed by group_id (order preserved).
+  function upsertGroups(deltas) {
+    setGroups((prev) => {
+      const map = new Map(prev.map((g) => [g.group_id, g]))
+      for (const g of deltas) map.set(g.group_id, g)
+      return Array.from(map.values())
+    })
+  }
+
   async function load() {
     setLoading(true)
     setError(null)
     try {
-      const data = await getJobs(limit ? Number(limit) : undefined)
-      setJobs(data.jobs || [])
+      const data = await getGroupedJobs(limit ? Number(limit) : undefined)
+      setGroups(data.groups || [])
     } catch (e) {
       setError(e)
     } finally {
@@ -113,27 +123,27 @@ export default function JobsView({ jobs, setJobs, selectedJob, onUseJob }) {
     setScrapePct(0)
     setScrapeMsg('Starting scrape…')
     try {
-      const { run_id } = await startScrape(buildParams())
-      // Poll until the background scrape finishes.
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        await new Promise((r) => setTimeout(r, 2000))
-        const s = await getScrapeStatus(run_id)
-        if (typeof s.percent === 'number') setScrapePct(s.percent)
-        setScrapeMsg(`Scrape ${s.status}${s.progress ? ` — ${s.progress}` : ''}`)
-        if (s.status === 'completed') {
+      await streamScrape(buildParams(), (ev) => {
+        if (ev.type === 'start') {
+          setGroups([])
+          setScrapePct(0)
+          setScrapeMsg(`Scraping ${ev.total} search term${ev.total === 1 ? '' : 's'}…`)
+        } else if (ev.type === 'term') {
+          if (Array.isArray(ev.groups) && ev.groups.length) upsertGroups(ev.groups)
+          if (typeof ev.percent === 'number') setScrapePct(ev.percent)
+          const note = ev.error
+            ? `error on “${ev.term}”`
+            : `${ev.term_job_count} from “${ev.term}”`
+          setScrapeMsg(`Scraped ${ev.index + 1}/${ev.total} — ${note}`)
+        } else if (ev.type === 'done') {
           setScrapePct(100)
-          setScrapeMsg(`Scrape complete — ${s.result?.count ?? 0} jobs found.`)
-          await load()
-          break
-        }
-        if (s.status === 'failed') {
-          setError(new Error(s.error || 'Scrape failed'))
+          setScrapeMsg(`Scrape complete — ${ev.total_groups} roles, ${ev.total_jobs} postings.`)
+        } else if (ev.type === 'error') {
+          setError(new Error(ev.message))
           setScrapeMsg('')
           setScrapePct(null)
-          break
         }
-      }
+      })
     } catch (e) {
       setError(e)
       setScrapeMsg('')
@@ -169,11 +179,7 @@ export default function JobsView({ jobs, setJobs, selectedJob, onUseJob }) {
         {scrapeMsg ? <span className="muted small">{scrapeMsg}</span> : null}
       </div>
 
-      {scrapePct !== null ? (
-        <div className="progress" role="progressbar" aria-valuenow={Math.round(scrapePct)} aria-valuemin={0} aria-valuemax={100}>
-          <div className="progress__bar" style={{ width: `${scrapePct}%` }} />
-        </div>
-      ) : null}
+      <ProgressBar pct={scrapePct} />
 
       {showFilters ? (
         <div className="panel">
@@ -283,21 +289,23 @@ export default function JobsView({ jobs, setJobs, selectedJob, onUseJob }) {
 
       <ErrorBanner error={error} />
 
-      {jobs.length === 0 && !loading ? (
+      {groups.length === 0 && !loading && !scraping ? (
         <p className="muted">
           No jobs loaded yet. Click <b>Load jobs</b> to read the latest scraped results,
           or <b>Scrape fresh</b> to fetch new ones (runs against live job boards).
         </p>
       ) : (
         <div className="grid">
-          {jobs.map((job, i) => (
-            <JobCard
-              key={job.id || i}
-              job={job}
-              onUse={onUseJob}
-              selected={selectedJob && selectedJob.id === job.id}
-            />
-          ))}
+          {groups.map((group, i) => {
+            const job = (group.postings && group.postings[0]) || {}
+            return (
+              <JobCard
+                key={group.group_id || job.id || i}
+                job={job}
+                group={group}
+              />
+            )
+          })}
         </div>
       )}
     </section>

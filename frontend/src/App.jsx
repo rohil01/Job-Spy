@@ -1,22 +1,25 @@
-import { useEffect, useState } from 'react'
-import { getHealth, API_BASE } from './api.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { getHealth, API_BASE, streamScreen } from './api.js'
 import HealthPill from './components/HealthPill.jsx'
 import JobsView from './components/JobsView.jsx'
-import FilteredView from './components/FilteredView.jsx'
-import ResumeView from './components/ResumeView.jsx'
+import ScreenView from './components/ScreenView.jsx'
 
 const TABS = [
   { key: 'jobs', label: 'Jobs' },
-  { key: 'filtered', label: 'Filtered' },
-  { key: 'resume', label: 'Resume' },
+  { key: 'screen', label: 'Screen' },
 ]
 
 export default function App() {
   const [tab, setTab] = useState('jobs')
   const [health, setHealth] = useState(null)
-  const [jobs, setJobs] = useState([])
-  const [selectedJob, setSelectedJob] = useState(null)
+  // `groups` is the source of truth for scrape results; the flat job list is derived.
+  const [groups, setGroups] = useState([])
+  // The résumé (a File) is uploaded once and shared by the screening workflow.
   const [resume, setResume] = useState(null)
+  const [screenRun, setScreenRun] = useState(null)
+  const screenAbort = useRef(null)
+
+  const jobs = useMemo(() => groups.flatMap((g) => g.postings || []), [groups])
 
   useEffect(() => {
     getHealth()
@@ -24,10 +27,71 @@ export default function App() {
       .catch(() => setHealth({ status: 'unreachable', ai_client_ready: false }))
   }, [])
 
-  function useJob(job) {
-    setSelectedJob(job)
-    setTab('resume')
+  // Screen every posting against the résumé + target window: one combined AI
+  // call per job estimates its required experience AND scores the fit. Results
+  // stream into two sections (matches / doesn't match). Callable from ScreenView.
+  async function startScreen(minYears, maxYears) {
+    if (!resume) {
+      setScreenRun({
+        running: false, min: minYears, max: maxYears, pct: 0, total: null,
+        matches: [], noMatches: [], done: false,
+        error: new Error('Upload a .docx résumé first.'),
+      })
+      return
+    }
+    if (screenAbort.current) screenAbort.current.abort()
+    const controller = new AbortController()
+    screenAbort.current = controller
+
+    setTab('screen')
+    setScreenRun({
+      running: true,
+      min: minYears,
+      max: maxYears,
+      pct: 0,
+      total: null,
+      matches: [],
+      noMatches: [],
+      done: false,
+      error: null,
+    })
+
+    try {
+      await streamScreen(
+        resume,
+        jobs && jobs.length ? jobs : null,
+        minYears,
+        maxYears,
+        (ev) => {
+          setScreenRun((prev) => {
+            if (!prev) return prev
+            if (ev.type === 'start') {
+              return { ...prev, total: ev.total, min: ev.min_years, max: ev.max_years }
+            }
+            if (ev.type === 'job') {
+              const bucket = ev.match ? 'matches' : 'noMatches'
+              return { ...prev, pct: ev.percent, [bucket]: [...prev[bucket], ev.job] }
+            }
+            if (ev.type === 'done') {
+              return { ...prev, running: false, done: true, pct: 100 }
+            }
+            if (ev.type === 'error') {
+              return { ...prev, running: false, error: new Error(ev.message) }
+            }
+            return prev
+          })
+        },
+        { signal: controller.signal },
+      )
+      // Stream ended without a terminal event -> just stop the spinner.
+      setScreenRun((prev) => (prev && prev.running ? { ...prev, running: false } : prev))
+    } catch (e) {
+      if (e.name === 'AbortError') return
+      setScreenRun((prev) => (prev ? { ...prev, running: false, error: e } : prev))
+    }
   }
+
+  const screenCount = screenRun ? screenRun.matches.length + screenRun.noMatches.length : 0
 
   return (
     <div className="app">
@@ -36,7 +100,7 @@ export default function App() {
           <span className="brand__logo">🕵️</span>
           <div>
             <h1 className="brand__name">JobSpy</h1>
-            <p className="brand__tag">Browse jobs · filter by experience · tailor your resume</p>
+            <p className="brand__tag">Browse jobs · screen against your résumé · tailor your resume</p>
           </div>
         </div>
         <HealthPill health={health} />
@@ -61,24 +125,22 @@ export default function App() {
           >
             {t.label}
             {t.key === 'jobs' && jobs.length ? <span className="tab__count">{jobs.length}</span> : null}
+            {t.key === 'screen' && screenCount ? <span className="tab__count">{screenCount}</span> : null}
           </button>
         ))}
       </nav>
 
       <main className="main">
         {tab === 'jobs' ? (
-          <JobsView jobs={jobs} setJobs={setJobs} selectedJob={selectedJob} onUseJob={useJob} />
+          <JobsView groups={groups} setGroups={setGroups} />
         ) : null}
-        {tab === 'filtered' ? (
-          <FilteredView jobs={jobs} onUseJob={useJob} selectedJob={selectedJob} />
-        ) : null}
-        {tab === 'resume' ? (
-          <ResumeView
+        {tab === 'screen' ? (
+          <ScreenView
+            screenRun={screenRun}
             resume={resume}
             setResume={setResume}
             jobs={jobs}
-            selectedJob={selectedJob}
-            setSelectedJob={setSelectedJob}
+            onStartScreen={startScreen}
           />
         ) : null}
       </main>

@@ -54,6 +54,64 @@ export function getJobs(limit) {
   return getJSON(`/jobs${q}`)
 }
 
+export function getGroupedJobs(limit) {
+  const q = limit ? `?limit=${encodeURIComponent(limit)}` : ''
+  return getJSON(`/jobs/grouped${q}`)
+}
+
+// Read an NDJSON (one JSON object per line) response body, calling onEvent(obj)
+// for every parsed line. Shared by the JSON and multipart streaming helpers.
+async function pumpNDJSON(res, onEvent) {
+  if (!res.body) throw new Error('Streaming responses are not supported in this browser.')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const emit = (line) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let obj
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      return // ignore an incomplete / malformed line
+    }
+    onEvent(obj)
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      emit(buffer.slice(0, nl))
+      buffer = buffer.slice(nl + 1)
+    }
+  }
+  // Flush any trailing line that wasn't newline-terminated.
+  buffer += decoder.decode()
+  emit(buffer)
+}
+
+// Stream NDJSON from a JSON POST endpoint. Calls onEvent(obj) for every parsed
+// line and resolves when the stream ends.
+export async function streamNDJSON(path, body, onEvent, { signal } = {}) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+    signal,
+  })
+  if (!res.ok) throw await readError(res)
+  await pumpNDJSON(res, onEvent)
+}
+
+export function streamScrape(params, onEvent, opts) {
+  return streamNDJSON('/scrape/stream', params || {}, onEvent, opts)
+}
+
 export function startScrape(params) {
   return postJSON('/scrape', params || {})
 }
@@ -71,6 +129,25 @@ export function filterExperience(jobs, minYears, maxYears) {
   const body = { min_years: minYears, max_years: maxYears ?? null }
   if (jobs) body.jobs = jobs
   return postJSON('/filter/experience', body)
+}
+
+export function streamFilterExperience(jobs, minYears, maxYears, onEvent, opts) {
+  const body = { min_years: minYears, max_years: maxYears ?? null }
+  if (jobs) body.jobs = jobs
+  return streamNDJSON('/filter/experience/stream', body, onEvent, opts)
+}
+
+// Combined screen (multipart: resume .docx + window + optional jobs). Streams
+// one `job` event per posting, each tagged `match` and carrying the fit score.
+export async function streamScreen(file, jobs, minYears, maxYears, onEvent, { signal } = {}) {
+  const form = new FormData()
+  form.append('resume', file, file.name)
+  if (minYears != null) form.append('min_years', String(minYears))
+  if (maxYears != null) form.append('max_years', String(maxYears))
+  if (jobs && jobs.length) form.append('jobs', JSON.stringify(jobs))
+  const res = await fetch(`${BASE}/screen/stream`, { method: 'POST', body: form, signal })
+  if (!res.ok) throw await readError(res)
+  await pumpNDJSON(res, onEvent)
 }
 
 export async function assessSuitability(file, job) {

@@ -76,16 +76,6 @@ cp .env.example .env               # Windows: copy .env.example .env
 # then edit .env and set NVIDIA_API_KEY=... (or OPENAI_API_KEY if you switch providers)
 ```
 
-### Run as a CLI pipeline
-
-Scrapes using the settings in `config.py`, then applies the experience filter:
-
-```bash
-python main.py
-# -> data/scraped_jobs.json
-# -> data/filtered_jobs.json
-```
-
 ### Run as an HTTP API
 
 ```bash

@@ -161,6 +161,42 @@ class TestTailorResume:
         assert 'plain text' in result['sections'][0]['bullets'][0]
 
 
+class TestScreenJob:
+    """Combined screen: one call returns required-years AND suitability."""
+
+    def test_combines_years_and_suitability(self):
+        payload = (
+            '{"required_min_years": 2, "required_max_years": 4, "score": 80, '
+            '"verdict": "strong", "matched_skills": ["Python"], '
+            '"missing_skills": ["Go"], "reasoning": "Good fit."}'
+        )
+        agent = _agent_with_replies(payload)
+        result = agent.screen_job({'title': 'Dev', 'description': '...'}, 'resume', 0, 3)
+        assert result['required_years'] == {'min': 2, 'max': 4}
+        assert result['experience_match'] is True  # [2,4] overlaps [0,3]
+        assert result['score'] == 80
+        assert result['verdict'] == 'strong'
+        assert result['matched_skills'] == ['Python']
+        assert result['missing_skills'] == ['Go']
+
+    def test_experience_match_computed_not_trusted(self):
+        # Job wants "6+ years" (open-ended); user window 0-3 => no match, even
+        # though the model never sends an experience_match field.
+        payload = '{"required_min_years": 6, "required_max_years": null, "score": 40, "verdict": "weak"}'
+        agent = _agent_with_replies(payload)
+        result = agent.screen_job({'title': 'Sr'}, 'resume', 0, 3)
+        assert result['required_years'] == {'min': 6, 'max': None}
+        assert result['experience_match'] is False
+
+    def test_degrades_on_non_json(self):
+        agent = _agent_with_replies('cannot help with that')
+        result = agent.screen_job({'title': 'Dev'}, 'resume', 0, 3)
+        assert result['required_years'] is None
+        assert result['experience_match'] is False  # unknown never matches a set window
+        assert result['verdict'] == 'unknown'
+        assert result['reasoning'] == 'cannot help with that'
+
+
 class TestExtractJson:
     def test_prose_wrapped(self):
         data = AIJobAgent._extract_json('Here you go: {"a": 1} thanks')

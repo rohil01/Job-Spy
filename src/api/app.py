@@ -4,10 +4,15 @@ Endpoints
 ---------
 GET  /health                      liveness + AI readiness
 POST /scrape                      (background) scrape (config.py, body overrides) -> JSON
+POST /scrape/stream               (streaming NDJSON) scrape, one event per search term
 GET  /scrape/{run_id}             poll a scrape run
 GET  /config/scrape               default scrape parameters (for UI prefill)
 GET  /jobs                        latest scraped jobs
+GET  /jobs/grouped                latest scraped jobs grouped by company + role
 POST /filter/experience           Agent 1: keep jobs whose required years overlap
+POST /filter/experience/stream    Agent 1 (streaming NDJSON): tag each posting selected/not
+POST /screen/stream               Agents 1+2 (streaming NDJSON): one call per job estimates
+                                  required experience AND scores resume fit
 POST /suitability                 Agent 2: score a resume against one job
 POST /tailor-resume               Agent 3: rewrite a resume -> .docx download
 POST /run                         (background) full chain: scrape/load -> filter
@@ -129,6 +134,23 @@ def start_scrape(
     return schemas.RunAccepted(run_id=run_id)
 
 
+@app.post("/scrape/stream")
+def scrape_stream(
+    request: Optional[schemas.ScrapeRequest] = None,
+) -> StreamingResponse:
+    """Scrape and stream results as NDJSON, one event per search term.
+
+    Emits ``start`` -> ``term`` (with per-term group deltas and a ``percent``
+    that advances each term) -> ``done``. Body fields override config.py, same
+    as ``POST /scrape``. The final flat list is persisted to disk so a later
+    ``GET /jobs`` / filter still works.
+    """
+    overrides = request.model_dump(exclude_none=True) if request else {}
+    return StreamingResponse(
+        service.stream_scrape(overrides), media_type="application/x-ndjson"
+    )
+
+
 @app.get("/scrape/{run_id}", response_model=schemas.RunStatus)
 def scrape_status(run_id: str) -> schemas.RunStatus:
     run = tasks.get_run(run_id)
@@ -150,6 +172,18 @@ def get_jobs(limit: Optional[int] = Query(default=None, ge=1)) -> schemas.JobsRe
     if limit is not None:
         jobs = jobs[:limit]
     return schemas.JobsResponse(count=len(jobs), jobs=jobs)
+
+
+@app.get("/jobs/grouped", response_model=schemas.GroupedJobsResponse)
+def get_grouped_jobs(
+    limit: Optional[int] = Query(default=None, ge=1),
+) -> schemas.GroupedJobsResponse:
+    """Return the latest scraped jobs grouped by company + exact role title.
+
+    ``limit`` caps the number of groups (not postings).
+    """
+    groups = service.load_grouped_jobs(limit)
+    return schemas.GroupedJobsResponse(count=len(groups), groups=groups)
 
 
 @app.post("/filter/experience", response_model=schemas.ExperienceFilterResponse)
@@ -176,6 +210,57 @@ def filter_experience(
         min_years=min_years,
         max_years=max_years,
         jobs=filtered,
+    )
+
+
+@app.post("/filter/experience/stream")
+def filter_experience_stream(
+    request: schemas.ExperienceFilterRequest,
+) -> StreamingResponse:
+    """Agent 1 (streaming) — evaluate each posting one-by-one and stream a verdict.
+
+    Emits ``start`` -> ``job`` (each tagged ``selected`` true/false, with a
+    ``percent``) -> ``done``. Jobs default to the latest scraped list and the
+    window defaults to config.py, mirroring ``POST /filter/experience``. Makes
+    one LLM call per posting, so a working AI key is required.
+    """
+    return StreamingResponse(
+        service.stream_filter_experience(
+            request.jobs, request.min_years, request.max_years
+        ),
+        media_type="application/x-ndjson",
+    )
+
+
+@app.post("/screen/stream")
+async def screen_stream(
+    resume: UploadFile = File(..., description="Resume as a .docx file"),
+    min_years: Optional[int] = Form(default=None, description="Target window lower bound"),
+    max_years: Optional[int] = Form(default=None, description="Target window upper bound; blank = open-ended"),
+    jobs: Optional[str] = Form(
+        default=None, description="JSON array of jobs; defaults to the latest scraped list"
+    ),
+) -> StreamingResponse:
+    """Agents 1+2 combined (streaming) — screen each posting against the resume.
+
+    For every job, ONE LLM call both estimates its required experience and
+    scores how well the resume fits. Emits ``start`` -> ``job`` (each tagged
+    ``match`` true/false and carrying score / verdict / matched+missing skills)
+    -> ``done``. Jobs default to the latest scraped list and the window defaults
+    to config.py. Makes one LLM call per posting, so a working AI key is required.
+    """
+    resume_text = await _read_resume_text(resume)
+    parsed_jobs = None
+    if jobs:
+        try:
+            parsed_jobs = json.loads(jobs)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="`jobs` must be valid JSON.")
+        if not isinstance(parsed_jobs, list):
+            raise HTTPException(status_code=400, detail="`jobs` must be a JSON array.")
+    return StreamingResponse(
+        service.stream_screen_jobs(resume_text, parsed_jobs, min_years, max_years),
+        media_type="application/x-ndjson",
     )
 
 

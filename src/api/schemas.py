@@ -31,6 +31,21 @@ class JobsResponse(BaseModel):
     jobs: List[Dict[str, Any]]
 
 
+class JobGroup(BaseModel):
+    """A set of duplicate postings for the same company + exact role title."""
+
+    group_id: str
+    company: str
+    title: str
+    count: int
+    postings: List[Dict[str, Any]]
+
+
+class GroupedJobsResponse(BaseModel):
+    count: int  # number of groups
+    groups: List[JobGroup]
+
+
 class ExperienceFilterRequest(BaseModel):
     jobs: Optional[List[Dict[str, Any]]] = Field(
         default=None,

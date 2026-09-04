@@ -63,7 +63,7 @@ AI_PROVIDER: str = "nvidia"
 # catalog but its inference function has been decommissioned — invoking it
 # returns HTTP 404 "Function ... not found for account". Use a model that is
 # actually served. meta/llama-3.3-70b-instruct is a confirmed-working drop-in.
-AI_MODEL: str = "meta/llama-3.3-70b-instruct"
+AI_MODEL: str = "nvidia/nemotron-3-super-120b-a12b"
 AI_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
 # API key is loaded from .env (NVIDIA_API_KEY). Leave as None here.

@@ -16,6 +16,7 @@ import config
 from scraper.scraper import JobScraper
 from Agent.ai_job_agent import AIJobAgent
 from Agent.resume_io import build_docx
+from pipeline.utils import make_json_safe, group_jobs
 
 from . import tasks
 
@@ -123,6 +124,25 @@ def load_latest_jobs() -> List[Dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         data = json.load(handle)
     return _json_sanitize(data) if isinstance(data, list) else []
+
+
+def _save_scraped(jobs: List[Dict[str, Any]]) -> None:
+    """Persist the flat, deduped job list to disk (JSON-safe)."""
+    path = _scraped_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(make_json_safe(jobs), handle, ensure_ascii=False, indent=2)
+
+
+def load_grouped_jobs(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Group the latest scraped jobs by company + exact title for display.
+
+    ``limit`` caps the number of *groups* returned (not postings).
+    """
+    groups = group_jobs(load_latest_jobs())
+    if limit is not None:
+        groups = groups[:limit]
+    return groups
 
 
 def find_job_by_id(job_id: str, jobs: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
@@ -278,3 +298,218 @@ def run_full_task(
         tasks.update_run(run_id, status="completed", progress="done", result=result)
     except Exception as exc:  # noqa: BLE001 - surface failure via run status
         tasks.update_run(run_id, status="failed", error=str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Streaming (NDJSON) generators
+# --------------------------------------------------------------------------- #
+def _ndjson_line(payload: Dict[str, Any]) -> str:
+    """Serialize one event to a JSON-safe NDJSON line (trailing newline)."""
+    safe = _json_sanitize(make_json_safe(payload))
+    return json.dumps(safe, ensure_ascii=False) + "\n"
+
+
+def stream_scrape(overrides: Optional[Dict[str, Any]] = None):
+    """Yield NDJSON events as each search term is scraped.
+
+    Sync generator (Starlette threadpools it) so the blocking per-term scrape
+    doesn't block the event loop. Duplicate postings (same company + title) are
+    grouped incrementally; each ``term`` event carries the created-or-updated
+    group deltas. The final flat, deduped list is persisted to disk so a later
+    "Load jobs"/filter still works.
+
+    Events: ``start`` -> ``term`` (xN) -> ``done``; a fatal failure emits
+    ``error`` instead of ``done``.
+    """
+    from pipeline.utils import JobGrouper
+
+    try:
+        scraper = get_scraper(overrides)
+        total = len(scraper.config.get("search_terms", []))
+        grouper = JobGrouper()
+        yield _ndjson_line({"type": "start", "total": total})
+
+        for event in scraper.scrape_iter():
+            deltas = grouper.add_jobs(event["jobs"])
+            index = event["index"]
+            ev_total = event["total"] or total
+            percent = round(100.0 * (index + 1) / ev_total, 1) if ev_total else 100.0
+            yield _ndjson_line(
+                {
+                    "type": "term",
+                    "term": event["term"],
+                    "index": index,
+                    "total": ev_total,
+                    "percent": percent,
+                    "term_job_count": len(event["jobs"]),
+                    "error": event["error"],
+                    "groups": deltas,
+                }
+            )
+
+        _save_scraped(grouper.flat_annotated())
+        yield _ndjson_line(
+            {
+                "type": "done",
+                "total_groups": grouper.num_groups(),
+                "total_jobs": grouper.num_jobs(),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - report as a stream event, not a 500
+        yield _ndjson_line({"type": "error", "message": str(exc)})
+
+
+def stream_filter_experience(
+    jobs: Optional[List[Dict[str, Any]]] = None,
+    min_years: Optional[int] = None,
+    max_years: Optional[int] = None,
+):
+    """Yield NDJSON events as each posting is evaluated one-by-one (one LLM call each).
+
+    Each posting is tagged ``selected`` (its required-years range overlaps the
+    target window) or not. Jobs whose requirement can't be estimated are
+    ``selected=False`` with ``required_years=null`` ("experience unknown"). The
+    window defaults to config.py when the request sets neither bound.
+
+    Events: ``start`` -> ``job`` (xN) -> ``done``; a fatal failure (e.g. no AI
+    client) emits ``error``.
+    """
+    try:
+        agent = get_agent()
+        if jobs is None:
+            jobs = load_latest_jobs()
+        if min_years is None and max_years is None:
+            cfg = load_config()
+            min_years = cfg.get("experience_min_years", 0)
+            max_years = cfg.get("experience_max_years")
+        else:
+            min_years = min_years if min_years is not None else 0
+
+        agent._require_client()  # fail fast with a clear message if unconfigured
+        total = len(jobs)
+        yield _ndjson_line(
+            {
+                "type": "start",
+                "total": total,
+                "min_years": min_years,
+                "max_years": max_years,
+            }
+        )
+
+        selected_count = 0
+        not_selected_count = 0
+        for index, job in enumerate(jobs):
+            required = agent._estimate_required_years(job)
+            matched = agent.experience_matches(required, min_years, max_years)
+            if matched:
+                selected_count += 1
+            else:
+                not_selected_count += 1
+            annotated = dict(job)
+            annotated["required_years"] = required
+            percent = round(100.0 * (index + 1) / total, 1) if total else 100.0
+            yield _ndjson_line(
+                {
+                    "type": "job",
+                    "index": index,
+                    "total": total,
+                    "percent": percent,
+                    "selected": matched,
+                    "required_years": required,
+                    "job": annotated,
+                }
+            )
+
+        yield _ndjson_line(
+            {
+                "type": "done",
+                "total": total,
+                "selected_count": selected_count,
+                "not_selected_count": not_selected_count,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - report as a stream event, not a 500
+        yield _ndjson_line({"type": "error", "message": str(exc)})
+
+
+def stream_screen_jobs(
+    resume_text: str,
+    jobs: Optional[List[Dict[str, Any]]] = None,
+    min_years: Optional[int] = None,
+    max_years: Optional[int] = None,
+):
+    """Yield NDJSON events as each posting is screened one-by-one.
+
+    Combines the experience filter and the suitability assessment into a single
+    LLM call per posting (:meth:`AIJobAgent.screen_job`): each call BOTH
+    estimates the job's required experience AND scores the resume against it.
+    ``match`` is the deterministic overlap of the required-years estimate with
+    the target ``[min_years, max_years]`` window; the window defaults to
+    config.py when the request sets neither bound. Each ``job`` payload also
+    carries ``score`` / ``verdict`` / ``matched_skills`` / ``missing_skills`` /
+    ``reasoning`` so the frontend can show the fit alongside the match verdict.
+
+    Events: ``start`` -> ``job`` (xN) -> ``done``; a fatal failure (e.g. no AI
+    client) emits ``error``.
+    """
+    try:
+        agent = get_agent()
+        if jobs is None:
+            jobs = load_latest_jobs()
+        if min_years is None and max_years is None:
+            cfg = load_config()
+            min_years = cfg.get("experience_min_years", 0)
+            max_years = cfg.get("experience_max_years")
+        else:
+            min_years = min_years if min_years is not None else 0
+
+        agent._require_client()  # fail fast with a clear message if unconfigured
+        total = len(jobs)
+        yield _ndjson_line(
+            {
+                "type": "start",
+                "total": total,
+                "min_years": min_years,
+                "max_years": max_years,
+            }
+        )
+
+        match_count = 0
+        no_match_count = 0
+        for index, job in enumerate(jobs):
+            result = agent.screen_job(job, resume_text, min_years, max_years)
+            matched = bool(result.get("experience_match"))
+            if matched:
+                match_count += 1
+            else:
+                no_match_count += 1
+            annotated = dict(job)
+            annotated["required_years"] = result.get("required_years")
+            annotated["experience_match"] = matched
+            annotated["score"] = result.get("score")
+            annotated["verdict"] = result.get("verdict")
+            annotated["matched_skills"] = result.get("matched_skills") or []
+            annotated["missing_skills"] = result.get("missing_skills") or []
+            annotated["reasoning"] = result.get("reasoning") or ""
+            percent = round(100.0 * (index + 1) / total, 1) if total else 100.0
+            yield _ndjson_line(
+                {
+                    "type": "job",
+                    "index": index,
+                    "total": total,
+                    "percent": percent,
+                    "match": matched,
+                    "job": annotated,
+                }
+            )
+
+        yield _ndjson_line(
+            {
+                "type": "done",
+                "total": total,
+                "match_count": match_count,
+                "no_match_count": no_match_count,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - report as a stream event, not a 500
+        yield _ndjson_line({"type": "error", "message": str(exc)})

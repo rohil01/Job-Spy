@@ -120,23 +120,93 @@ class AIJobAgent:
         prompt: str,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        system: Optional[str] = None,
     ) -> str:
-        """Send a single-turn chat request and return the text content."""
+        """Send a single-turn chat request and return the text content.
+
+        All three agents expect a single JSON object back, so for NVIDIA
+        Nemotron reasoning models we default to sending the documented
+        ``detailed thinking off`` system prompt. Left on, those models emit a
+        long chain-of-thought *into the content* that both burns the token
+        budget before any JSON is produced and pollutes the parsed output.
+        Pass ``system`` explicitly to override.
+        """
         self._require_client()
+        if system is None and self.ai_model and 'nemotron' in self.ai_model.lower():
+            system = 'detailed thinking off'
+        messages: List[Dict[str, str]] = []
+        if system:
+            messages.append({'role': 'system', 'content': system})
+        messages.append({'role': 'user', 'content': prompt})
         kwargs: Dict[str, Any] = {
             'model': self.ai_model,
-            'messages': [{'role': 'user', 'content': prompt}],
+            'messages': messages,
             'temperature': temperature,
         }
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = self._ai_client.chat.completions.create(**kwargs)
-        return (response.choices[0].message.content or '').strip()
+        message = response.choices[0].message
+        content = (message.content or '').strip()
+        # Some reasoning models leave content empty and put the answer in a
+        # separate reasoning_content field; fall back to it only if needed.
+        if not content:
+            reasoning = getattr(message, 'reasoning_content', None)
+            if isinstance(reasoning, str):
+                content = reasoning.strip()
+        return content
+
+    @staticmethod
+    def _find_last_json_object(text: str) -> Optional[Dict[str, Any]]:
+        """Return the last balanced ``{...}`` object in ``text`` that parses.
+
+        Reasoning models often emit prose (which may itself contain braces)
+        before the final JSON answer, so a greedy first-brace-to-last-brace
+        match is unreliable. This scans for balanced top-level objects
+        (ignoring braces inside strings) and returns the last one that
+        ``json.loads`` accepts — i.e. the final answer.
+        """
+        candidates: List[str] = []
+        depth = 0
+        start: Optional[int] = None
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text):
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}' and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(text[start:i + 1])
+                    start = None
+        for chunk in reversed(candidates):
+            try:
+                return json.loads(chunk)
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:
-        """Parse a JSON object from model output, tolerating fences/prose."""
+        """Parse a JSON object from model output, tolerating fences/prose/reasoning."""
         cleaned = text.strip()
+        # Drop a reasoning trace wrapped in <think>...</think>, if present, and
+        # anything up to a stray closing tag (truncated/streamed reasoning).
+        cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+        if '</think>' in cleaned:
+            cleaned = cleaned.rsplit('</think>', 1)[-1].strip()
         # Strip a leading ```json / ``` fence if present.
         if cleaned.startswith('```'):
             cleaned = re.sub(r'^```[a-zA-Z]*\n?', '', cleaned)
@@ -145,13 +215,27 @@ class AIJobAgent:
             return json.loads(cleaned)
         except Exception:
             pass
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except Exception:
-                pass
+        obj = AIJobAgent._find_last_json_object(cleaned)
+        if obj is not None:
+            return obj
         raise ValueError(f'Could not parse JSON from model output: {text[:200]!r}')
+
+    @staticmethod
+    def _coerce_required_years(job_min: Any, job_max: Any) -> Optional[Dict[str, Any]]:
+        """Coerce a raw model min/max pair into ``{"min", "max"}`` or None.
+
+        Returns None when ``job_min`` isn't a usable number (so callers can drop
+        the estimate). ``job_max`` degrades to None (open-ended) when missing or
+        non-numeric, and is floored at ``min``. Booleans are rejected (``bool``
+        is an ``int`` subclass, and ``True``/``False`` are never valid years).
+        """
+        if not isinstance(job_min, (int, float)) or isinstance(job_min, bool):
+            return None
+        if not isinstance(job_max, (int, float)) or isinstance(job_max, bool):
+            job_max = None  # null / missing / non-numeric => open-ended
+        min_i = max(0, int(job_min))
+        max_i = None if job_max is None else max(min_i, int(job_max))
+        return {'min': min_i, 'max': max_i}
 
     # ------------------------------------------------------------------ #
     # Agent 1 — experience-years filter
@@ -175,15 +259,9 @@ class AIJobAgent:
         except ValueError:
             return None
 
-        job_min = data.get('min_years')
-        if not isinstance(job_min, (int, float)) or isinstance(job_min, bool):
-            return None
-        job_max = data.get('max_years')
-        if not isinstance(job_max, (int, float)) or isinstance(job_max, bool):
-            job_max = None  # null / missing / non-numeric => open-ended
-        min_i = max(0, int(job_min))
-        max_i = None if job_max is None else max(min_i, int(job_max))
-        return {'min': min_i, 'max': max_i}
+        return self._coerce_required_years(
+            data.get('min_years'), data.get('max_years')
+        )
 
     def filter_by_experience_years(
         self,
@@ -198,34 +276,52 @@ class AIJobAgent:
         ``None`` the jobs are returned unfiltered. Each kept job is a shallow
         copy with a ``required_years`` = ``{"min", "max"}`` field attached.
 
-        A job is kept when its estimated required range overlaps the window::
-
-            keep  <=>  job_min <= user_max  AND  (job_max is None OR job_max >= user_min)
-
-        Jobs whose required years can't be estimated are dropped (consistent
-        with the previous level filter, which dropped non-matching jobs).
+        A job is kept when its estimated required range overlaps the window
+        (see :meth:`experience_matches`). Jobs whose required years can't be
+        estimated are dropped (consistent with the previous level filter, which
+        dropped non-matching jobs).
         """
         if min_years is None and max_years is None:
             return jobs
         self._require_client()
-
-        user_min = 0 if min_years is None else max(0, int(min_years))
-        user_max = None if max_years is None else max(user_min, int(max_years))
 
         filtered_jobs: List[Dict[str, Any]] = []
         for job in jobs:
             required = self._estimate_required_years(job)
             if required is None:
                 continue
-            job_min, job_max = required['min'], required['max']
-            below = user_max is not None and job_min > user_max
-            above = job_max is not None and job_max < user_min
-            if below or above:
+            if not self.experience_matches(required, min_years, max_years):
                 continue
             kept = dict(job)
             kept['required_years'] = required
             filtered_jobs.append(kept)
         return filtered_jobs
+
+    @staticmethod
+    def experience_matches(
+        required: Optional[Dict[str, Any]],
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ) -> bool:
+        """Whether a job's required-years range overlaps the target window.
+
+        ``required`` is ``{"min", "max"}`` (``max`` None = open-ended) or None
+        when the requirement couldn't be estimated. With both bounds None the
+        window is unconstrained and everything matches; an unknown ``required``
+        never matches a constrained window::
+
+            keep  <=>  job_min <= user_max  AND  (job_max is None OR job_max >= user_min)
+        """
+        if min_years is None and max_years is None:
+            return True
+        if required is None:
+            return False
+        user_min = 0 if min_years is None else max(0, int(min_years))
+        user_max = None if max_years is None else max(user_min, int(max_years))
+        job_min, job_max = required['min'], required['max']
+        below = user_max is not None and job_min > user_max
+        above = job_max is not None and job_max < user_min
+        return not (below or above)
 
     # ------------------------------------------------------------------ #
     # Agent 2 — resume suitability assessment
@@ -245,7 +341,7 @@ class AIJobAgent:
             company=job.get('company', ''),
             description=job.get('description', ''),
         )
-        raw = self._chat(prompt, temperature=0.2, max_tokens=800)
+        raw = self._chat(prompt, temperature=0.2, max_tokens=1500)
         try:
             data = self._extract_json(raw)
         except ValueError:
@@ -262,6 +358,61 @@ class AIJobAgent:
             'score': data.get('score'),
             'verdict': data.get('verdict', 'unknown'),
             'experience_match': data.get('experience_match'),
+            'matched_skills': data.get('matched_skills') or [],
+            'missing_skills': data.get('missing_skills') or [],
+            'reasoning': data.get('reasoning', ''),
+        }
+
+    def screen_job(
+        self,
+        job: Dict[str, Any],
+        resume_text: str,
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ) -> Dict[str, Any]:
+        """Combined screen (Agents 1 + 2 in ONE call).
+
+        A single LLM request both estimates the years of experience ``job``
+        requires AND assesses how well ``resume_text`` fits it. This is cheaper
+        and more consistent than calling the experience filter and the
+        suitability assessor separately.
+
+        ``experience_match`` is computed here from the model's required-years
+        estimate versus the candidate's ``[min_years, max_years]`` window (see
+        :meth:`experience_matches`) — it is NOT taken from the model, so the
+        window and the verdict can never disagree. Returns ``required_years``
+        (``{"min", "max"}`` or None), ``experience_match``, ``score``,
+        ``verdict``, ``matched_skills``, ``missing_skills``, and ``reasoning``.
+        """
+        self._require_client()
+        prompt = self._load_prompts()['screen_prompt'].format(
+            resume=resume_text,
+            title=job.get('title', ''),
+            company=job.get('company', ''),
+            description=job.get('description', ''),
+        )
+        raw = self._chat(prompt, temperature=0.2, max_tokens=1500)
+        try:
+            data = self._extract_json(raw)
+        except ValueError:
+            # Degrade gracefully: unknown requirement never matches a set window.
+            return {
+                'required_years': None,
+                'experience_match': self.experience_matches(None, min_years, max_years),
+                'score': None,
+                'verdict': 'unknown',
+                'matched_skills': [],
+                'missing_skills': [],
+                'reasoning': raw,
+            }
+        required = self._coerce_required_years(
+            data.get('required_min_years'), data.get('required_max_years')
+        )
+        return {
+            'required_years': required,
+            'experience_match': self.experience_matches(required, min_years, max_years),
+            'score': data.get('score'),
+            'verdict': data.get('verdict', 'unknown'),
             'matched_skills': data.get('matched_skills') or [],
             'missing_skills': data.get('missing_skills') or [],
             'reasoning': data.get('reasoning', ''),

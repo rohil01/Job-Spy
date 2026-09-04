@@ -38,6 +38,31 @@ suitability_prompt: |
     "reasoning": "<2-4 sentence explanation of the score>"
   }}
 
+screen_prompt: |
+  You are a career coach screening a job for a candidate. In ONE pass, do two
+  things: (1) estimate how many years of professional experience the JOB
+  requires, and (2) assess how well the candidate's RESUME fits the job, paying
+  attention to required experience, skills, and domain.
+
+  Candidate Resume:
+  {resume}
+
+  Job Title: {title}
+  Company: {company}
+  Job Description:
+  {description}
+
+  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  {{
+    "required_min_years": <integer, minimum years the JOB requires, 0 if none stated>,
+    "required_max_years": <integer or null, upper bound; null if open-ended (e.g. "5+ years")>,
+    "score": <integer 0-100, overall suitability of the resume for this job>,
+    "verdict": "<strong | moderate | weak>",
+    "matched_skills": ["skills from the resume that the job wants"],
+    "missing_skills": ["skills the job wants that the resume lacks"],
+    "reasoning": "<2-4 sentence explanation of the score>"
+  }}
+
 resume_tailor_prompt: |
   You are an expert resume writer. Rewrite the candidate's resume so it is
   tailored to the target job below. Keep every claim truthful — do NOT invent

@@ -9,7 +9,7 @@ the project ``config.py`` and saves its results to JSON.
 import json
 import importlib.util
 from pathlib import Path
-from typing import List, Union, Optional, Dict, Any
+from typing import List, Union, Optional, Dict, Any, Iterator
 
 import pandas as pd
 
@@ -96,7 +96,8 @@ def scrape_jobs_from_sites(
         "distance": distance,
         "is_remote": is_remote,
         "easy_apply": easy_apply,
-        "description_format": description_format,
+        "description_format": description_format, 
+        "verbose": 2,  # Set verbose to 2 for detailed output
     }
 
     # Add optional parameters if provided
@@ -175,13 +176,16 @@ class JobScraper:
         from pipeline.utils import setup_logger
         self.logger = setup_logger("scraper")
 
-    def scrape(self, progress_callback=None) -> List[Dict[str, Any]]:
-        """Scrape all configured terms/sites and return deduplicated jobs.
+    def scrape_iter(self, progress_callback=None) -> Iterator[Dict[str, Any]]:
+        """Yield scraped jobs one search term at a time.
 
-        ``progress_callback(completed, total, message)`` (optional) is called as
-        each search term is processed so callers can render a progress bar.
+        Each yield is ``{"term", "index", "total", "jobs": [...], "error":
+        str|None}``. Deduplication/grouping is left to the caller; this only
+        fans out the per-term scrape, keeping the same ``progress_callback`` and
+        cooldown behavior as :meth:`scrape`. It is a plain (sync) generator so
+        blocking network work can be threadpooled by callers that stream it.
         """
-        from pipeline.utils import cooldown_sleep, deduplicate_jobs
+        from pipeline.utils import cooldown_sleep
 
         sites = self.config.get("sites", [])
         search_terms = self.config.get("search_terms", [])
@@ -204,10 +208,11 @@ class JobScraper:
             if progress_callback is not None:
                 progress_callback(completed, total, message)
 
-        all_jobs: List[Dict[str, Any]] = []
         for index, term in enumerate(search_terms):
             _report(index, f"Scraping '{term}' ({index + 1}/{total})")
             self.logger.info(f"Scraping '{term}' across {sites}")
+            jobs: List[Dict[str, Any]] = []
+            error: Optional[str] = None
             try:
                 df = scrape_jobs_from_sites(
                     site_name=sites,
@@ -218,23 +223,48 @@ class JobScraper:
                 if df is not None and not df.empty:
                     jobs = df.to_dict("records")
                     self.logger.info(f"Retrieved {len(jobs)} jobs for '{term}'")
-                    all_jobs.extend(jobs)
                     _report(index + 1, f"Found {len(jobs)} jobs for '{term}' ({index + 1}/{total})")
                 else:
                     self.logger.warning(f"No jobs returned for '{term}'")
                     _report(index + 1, f"No jobs for '{term}' ({index + 1}/{total})")
             except Exception as exc:  # noqa: BLE001 - log and continue other terms
+                error = str(exc)
                 self.logger.error(f"Error scraping '{term}': {exc}", exc_info=True)
                 _report(index + 1, f"Error on '{term}' ({index + 1}/{total})")
+
+            yield {
+                "term": term,
+                "index": index,
+                "total": total,
+                "jobs": jobs,
+                "error": error,
+            }
 
             # Cooldown between terms (never after the last one).
             if cooldown_minutes and index < total - 1:
                 _report(index + 1, f"Cooling down {cooldown_minutes:g} min before next term…")
                 cooldown_sleep(cooldown_minutes, self.logger)
 
-        unique_jobs = deduplicate_jobs(all_jobs)
+    def scrape(self, progress_callback=None) -> List[Dict[str, Any]]:
+        """Scrape all configured terms/sites and return deduplicated jobs.
+
+        ``progress_callback(completed, total, message)`` (optional) is called as
+        each search term is processed so callers can render a progress bar. The
+        returned list is flat and deduplicated (as before), with every posting
+        annotated with ``group_id``/``group_count`` so callers can link exact
+        duplicate roles (same company + title).
+        """
+        from pipeline.utils import JobGrouper
+
+        grouper = JobGrouper()
+        total_scraped = 0
+        for event in self.scrape_iter(progress_callback=progress_callback):
+            total_scraped += len(event["jobs"])
+            grouper.add_jobs(event["jobs"])
+
+        unique_jobs = grouper.flat_annotated()
         self.logger.info(
-            f"{len(all_jobs)} jobs scraped -> {len(unique_jobs)} after dedup"
+            f"{total_scraped} jobs scraped -> {len(unique_jobs)} after dedup"
         )
         return unique_jobs
 

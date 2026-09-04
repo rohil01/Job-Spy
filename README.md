@@ -14,10 +14,10 @@ small React UI.
                 └──────────────┘         │ overlap your target window        │
                                          └───────────────┬───────────────────┘
                     ┌──────────────┐                     ▼
- resume (.docx) ───▶│ Agent 2 · Suitability │──scores──▶┌──────────────────────┐
-                    │ score resume vs job   │           │ Agent 3 · Tailoring  │
-                    └───────────────────────┘           │ rewrite resume .docx │
-                                                        └──────────────────────┘
+ resume (.docx) ───▶│ Agent 2 · Suitability │──scores
+                    │ score resume vs job   │           
+                    └───────────────────────┘          
+                                                      
 ```
 
 - **Scraper** (`src/scraper/`) — runs one pass per search term over the configured
@@ -29,8 +29,6 @@ small React UI.
   `src/Agent/ai_job_agent.py`) — keeps jobs whose estimated required years of
   experience overlap `[min_years, max_years]`. Writes `data/filtered_jobs.json`.
 - **Agent 2 — Suitability** — scores how well a resume fits a specific job.
-- **Agent 3 — Tailoring** — rewrites a resume for a specific job and returns an
-  updated `.docx`.
 
 All three agents share one OpenAI-compatible chat model — NVIDIA NIM by default
 (`meta/llama-3.3-70b-instruct`) reached through the `openai` client,

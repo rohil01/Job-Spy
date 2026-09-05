@@ -113,6 +113,25 @@ class TestExperienceFilter:
         jobs = [{'title': 'Mystery', 'description': '...'}]
         assert agent.filter_by_experience_years(jobs, 0, 10) == []
 
+    def test_drops_invalid_experience_range(self):
+        agent = _agent_with_replies('{"min_years": 5, "max_years": 2}')
+        jobs = [{'title': 'Invalid range', 'description': '...'}]
+        assert agent.filter_by_experience_years(jobs, 0, 10) == []
+
+    @patch('Agent.ai_job_agent.sleep')
+    def test_retries_failed_estimate(self, mock_sleep):
+        agent = AIJobAgent({'ai_provider': None})
+        agent._ai_client = Mock()
+        agent._estimate_required_years = Mock(
+            side_effect=[RuntimeError('temporary failure'), {'min': 1, 'max': 3}]
+        )
+
+        result = agent.filter_by_experience_years([{'title': 'Dev'}], 0, 3)
+
+        assert len(result) == 1
+        assert agent._estimate_required_years.call_count == 2
+        mock_sleep.assert_called_once_with(agent.FILTER_RETRY_DELAY_SECONDS)
+
 
 class TestSuitability:
     def test_parses_json(self):
@@ -140,6 +159,12 @@ class TestSuitability:
         result = agent.assess_suitability({'title': 'Dev'}, 'resume')
         assert result['verdict'] == 'unknown'
         assert result['reasoning'] == 'Sorry, I cannot comply.'
+
+    def test_degrades_on_invalid_score(self):
+        agent = _agent_with_replies('{"score": 140, "verdict": "strong"}')
+        result = agent.assess_suitability({'title': 'Dev'}, 'resume')
+        assert result['score'] is None
+        assert result['verdict'] == 'unknown'
 
 
 class TestTailorResume:

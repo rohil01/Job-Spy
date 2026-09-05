@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getHealth, API_BASE, streamScreen } from './api.js'
 import HealthPill from './components/HealthPill.jsx'
+import ThemeToggle from './components/ThemeToggle.jsx'
 import JobsView from './components/JobsView.jsx'
 import ScreenView from './components/ScreenView.jsx'
 
@@ -8,6 +9,19 @@ const TABS = [
   { key: 'jobs', label: 'Jobs' },
   { key: 'screen', label: 'Screen' },
 ]
+
+// The recon "scope" mark — a reticle over concentric range rings. Stands in for
+// the old emoji and carries the surveillance/intelligence identity.
+function ScopeMark() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" strokeWidth="1.5" opacity="0.5" />
+      <circle cx="12" cy="12" r="5" strokeWidth="1.5" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
 
 export default function App() {
   const [tab, setTab] = useState('jobs')
@@ -97,13 +111,16 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="brand">
-          <span className="brand__logo">🕵️</span>
+          <span className="brand__mark"><ScopeMark /></span>
           <div>
-            <h1 className="brand__name">JobSpy</h1>
-            <p className="brand__tag">Browse jobs · screen against your résumé · tailor your resume</p>
+            <h1 className="brand__name">Job<b>Spy</b></h1>
+            <p className="brand__tag">recon across job boards · screened against your résumé</p>
           </div>
         </div>
-        <HealthPill health={health} />
+        <div className="header__side">
+          <HealthPill health={health} />
+          <ThemeToggle />
+        </div>
       </header>
 
       {health && health.status === 'unreachable' ? (
@@ -146,7 +163,8 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <span>API: <code>{API_BASE}</code></span>
+        <span>JobSpy · job market reconnaissance</span>
+        <span>API · <code>{API_BASE}</code></span>
       </footer>
     </div>
   )

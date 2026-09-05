@@ -17,15 +17,65 @@ import os
 import json
 import re
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import sleep
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, ValidationError, field_validator
 import yaml
+
+
+class ExperienceYearsOutput(BaseModel):
+    min_years: int = Field(ge=0)
+    max_years: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator('max_years')
+    @classmethod
+    def max_cannot_be_below_min(cls, value: Optional[int], info):
+        if value is not None and value < info.data['min_years']:
+            raise ValueError('max_years cannot be below min_years')
+        return value
+
+
+class SuitabilityOutput(BaseModel):
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+    verdict: str = 'unknown'
+    experience_match: Optional[bool] = None
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+    reasoning: str = ''
+
+
+class ScreenOutput(BaseModel):
+    required_min_years: Optional[int] = Field(default=None, ge=0)
+    required_max_years: Optional[int] = Field(default=None, ge=0)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+    verdict: str = 'unknown'
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+    reasoning: str = ''
+
+
+class ResumeSectionOutput(BaseModel):
+    heading: str = ''
+    bullets: List[str] = Field(default_factory=list)
+
+
+class TailoredResumeOutput(BaseModel):
+    name: str = ''
+    contact: str = ''
+    summary: str = ''
+    sections: List[ResumeSectionOutput] = Field(default_factory=list)
 
 
 class AIJobAgent:
     """Filters jobs by experience, assesses resume suitability, and rewrites resumes."""
+
+    FILTER_MAX_WORKERS = 5
+    FILTER_MAX_ATTEMPTS = 3
+    FILTER_RETRY_DELAY_SECONDS = 0.25
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """Initialize the agent.
@@ -255,13 +305,75 @@ class AIJobAgent:
         )
         raw = self._chat(prompt)
         try:
-            data = self._extract_json(raw)
-        except ValueError:
+            data = ExperienceYearsOutput.model_validate(self._extract_json(raw))
+        except (ValueError, ValidationError):
             return None
 
-        return self._coerce_required_years(
-            data.get('min_years'), data.get('max_years')
-        )
+        return self._coerce_required_years(data.min_years, data.max_years)
+
+    def _estimate_required_years_with_retry(
+        self, job: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Estimate one job's requirement, retrying transient call failures."""
+        for attempt in range(self.FILTER_MAX_ATTEMPTS):
+            try:
+                return self._estimate_required_years(job)
+            except Exception:
+                if attempt == self.FILTER_MAX_ATTEMPTS - 1:
+                    raise
+                sleep(self.FILTER_RETRY_DELAY_SECONDS * (2 ** attempt))
+
+        return None  # The loop either returns or raises on its final attempt.
+
+    def estimate_required_years_parallel(
+        self, jobs: List[Dict[str, Any]]
+    ) -> List[Optional[Dict[str, Any]]]:
+        """Estimate requirements concurrently while retaining input order."""
+        if not jobs:
+            return []
+        workers = min(self.FILTER_MAX_WORKERS, len(jobs))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(self._estimate_required_years_with_retry, jobs))
+
+    def _screen_job_with_retry(
+        self,
+        job: Dict[str, Any],
+        resume_text: str,
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ) -> Dict[str, Any]:
+        """Screen one job, retrying transient call failures."""
+        for attempt in range(self.FILTER_MAX_ATTEMPTS):
+            try:
+                return self.screen_job(job, resume_text, min_years, max_years)
+            except Exception:
+                if attempt == self.FILTER_MAX_ATTEMPTS - 1:
+                    raise
+                sleep(self.FILTER_RETRY_DELAY_SECONDS * (2 ** attempt))
+
+        raise RuntimeError('Screening failed unexpectedly.')
+
+    def screen_jobs_parallel(
+        self,
+        jobs: List[Dict[str, Any]],
+        resume_text: str,
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        """Screen jobs concurrently while retaining input order."""
+        if not jobs:
+            return []
+        workers = min(self.FILTER_MAX_WORKERS, len(jobs))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(
+                executor.map(
+                    self._screen_job_with_retry,
+                    jobs,
+                    [resume_text] * len(jobs),
+                    [min_years] * len(jobs),
+                    [max_years] * len(jobs),
+                )
+            )
 
     def filter_by_experience_years(
         self,
@@ -286,8 +398,8 @@ class AIJobAgent:
         self._require_client()
 
         filtered_jobs: List[Dict[str, Any]] = []
-        for job in jobs:
-            required = self._estimate_required_years(job)
+        estimates = self.estimate_required_years_parallel(jobs)
+        for job, required in zip(jobs, estimates):
             if required is None:
                 continue
             if not self.experience_matches(required, min_years, max_years):
@@ -343,8 +455,8 @@ class AIJobAgent:
         )
         raw = self._chat(prompt, temperature=0.2, max_tokens=1500)
         try:
-            data = self._extract_json(raw)
-        except ValueError:
+            data = SuitabilityOutput.model_validate(self._extract_json(raw))
+        except (ValueError, ValidationError):
             # Degrade gracefully rather than failing the whole request.
             return {
                 'score': None,
@@ -355,12 +467,12 @@ class AIJobAgent:
                 'reasoning': raw,
             }
         return {
-            'score': data.get('score'),
-            'verdict': data.get('verdict', 'unknown'),
-            'experience_match': data.get('experience_match'),
-            'matched_skills': data.get('matched_skills') or [],
-            'missing_skills': data.get('missing_skills') or [],
-            'reasoning': data.get('reasoning', ''),
+            'score': data.score,
+            'verdict': data.verdict,
+            'experience_match': data.experience_match,
+            'matched_skills': data.matched_skills,
+            'missing_skills': data.missing_skills,
+            'reasoning': data.reasoning,
         }
 
     def screen_job(
@@ -393,8 +505,8 @@ class AIJobAgent:
         )
         raw = self._chat(prompt, temperature=0.2, max_tokens=1500)
         try:
-            data = self._extract_json(raw)
-        except ValueError:
+            data = ScreenOutput.model_validate(self._extract_json(raw))
+        except (ValueError, ValidationError):
             # Degrade gracefully: unknown requirement never matches a set window.
             return {
                 'required_years': None,
@@ -406,16 +518,16 @@ class AIJobAgent:
                 'reasoning': raw,
             }
         required = self._coerce_required_years(
-            data.get('required_min_years'), data.get('required_max_years')
+            data.required_min_years, data.required_max_years
         )
         return {
             'required_years': required,
             'experience_match': self.experience_matches(required, min_years, max_years),
-            'score': data.get('score'),
-            'verdict': data.get('verdict', 'unknown'),
-            'matched_skills': data.get('matched_skills') or [],
-            'missing_skills': data.get('missing_skills') or [],
-            'reasoning': data.get('reasoning', ''),
+            'score': data.score,
+            'verdict': data.verdict,
+            'matched_skills': data.matched_skills,
+            'missing_skills': data.missing_skills,
+            'reasoning': data.reasoning,
         }
 
     # ------------------------------------------------------------------ #
@@ -438,8 +550,8 @@ class AIJobAgent:
         )
         raw = self._chat(prompt, temperature=0.3, max_tokens=2000)
         try:
-            data = self._extract_json(raw)
-        except ValueError:
+            data = TailoredResumeOutput.model_validate(self._extract_json(raw))
+        except (ValueError, ValidationError):
             # Preserve the model's text so the user still gets a document.
             return {
                 'name': '',
@@ -448,8 +560,8 @@ class AIJobAgent:
                 'sections': [{'heading': 'Tailored Resume', 'bullets': [raw]}],
             }
         return {
-            'name': data.get('name', ''),
-            'contact': data.get('contact', ''),
-            'summary': data.get('summary', ''),
-            'sections': data.get('sections') or [],
+            'name': data.name,
+            'contact': data.contact,
+            'summary': data.summary,
+            'sections': [section.model_dump() for section in data.sections],
         }

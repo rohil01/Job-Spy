@@ -155,6 +155,7 @@ export default function JobsView({ groups, setGroups }) {
 
   return (
     <section>
+      <p className="eyebrow" style={{ marginBottom: 12 }}>Recon · job boards</p>
       <div className="toolbar">
         <button className="btn btn--primary" onClick={load} disabled={loading}>
           {loading ? <Spinner label="Loading…" /> : 'Load jobs'}
@@ -290,10 +291,19 @@ export default function JobsView({ groups, setGroups }) {
       <ErrorBanner error={error} />
 
       {groups.length === 0 && !loading && !scraping ? (
-        <p className="muted">
-          No jobs loaded yet. Click <b>Load jobs</b> to read the latest scraped results,
-          or <b>Scrape fresh</b> to fetch new ones (runs against live job boards).
-        </p>
+        <div className="empty">
+          <div className="empty__mark">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+            </svg>
+          </div>
+          <h3>No jobs in view</h3>
+          <p>
+            Hit <b>Load jobs</b> to read the latest scraped results, or <b>Scrape fresh</b> to
+            run a new pass against live job boards.
+          </p>
+        </div>
       ) : (
         <div className="grid">
           {groups.map((group, i) => {

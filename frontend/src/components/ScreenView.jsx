@@ -51,6 +51,7 @@ export default function ScreenView({
 
   return (
     <section>
+      <p className="eyebrow" style={{ marginBottom: 12 }}>Screening · résumé fit</p>
       <div className="panel">
         <h3 className="panel__title">1 · Your résumé</h3>
         <input type="file" accept=".docx" onChange={onFile} />
@@ -65,7 +66,7 @@ export default function ScreenView({
 
       <div className="panel">
         <h3 className="panel__title">2 · Experience window &amp; screen</h3>
-        <p className="muted">
+        <p className="lede">
           One AI call per posting estimates the <strong>years it requires</strong> and scores
           how well your résumé <strong>fits</strong>. Postings whose required experience overlaps
           your window land under <strong>Matches your experience</strong>; the rest under{' '}

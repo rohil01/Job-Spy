@@ -364,7 +364,7 @@ def stream_filter_experience(
     min_years: Optional[int] = None,
     max_years: Optional[int] = None,
 ):
-    """Yield NDJSON events as each posting is evaluated one-by-one (one LLM call each).
+    """Yield NDJSON events after bounded concurrent per-posting evaluations.
 
     Each posting is tagged ``selected`` (its required-years range overlaps the
     target window) or not. Jobs whose requirement can't be estimated are
@@ -398,8 +398,10 @@ def stream_filter_experience(
 
         selected_count = 0
         not_selected_count = 0
-        for index, job in enumerate(jobs):
-            required = agent._estimate_required_years(job)
+        estimates = agent.estimate_required_years_parallel(jobs)
+        if not isinstance(estimates, list):
+            estimates = [agent._estimate_required_years(job) for job in jobs]
+        for index, (job, required) in enumerate(zip(jobs, estimates)):
             matched = agent.experience_matches(required, min_years, max_years)
             if matched:
                 selected_count += 1
@@ -476,8 +478,13 @@ def stream_screen_jobs(
 
         match_count = 0
         no_match_count = 0
-        for index, job in enumerate(jobs):
-            result = agent.screen_job(job, resume_text, min_years, max_years)
+        results = agent.screen_jobs_parallel(jobs, resume_text, min_years, max_years)
+        if not isinstance(results, list):
+            results = [
+                agent.screen_job(job, resume_text, min_years, max_years)
+                for job in jobs
+            ]
+        for index, (job, result) in enumerate(zip(jobs, results)):
             matched = bool(result.get("experience_match"))
             if matched:
                 match_count += 1

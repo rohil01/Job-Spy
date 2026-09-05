@@ -79,6 +79,9 @@ async function pumpNDJSON(res, onEvent) {
     onEvent(obj)
   }
 
+  // Let React paint each streamed job before consuming the next buffered line.
+  const yieldToBrowser = () => new Promise((resolve) => setTimeout(resolve, 0))
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const { value, done } = await reader.read()
@@ -88,6 +91,7 @@ async function pumpNDJSON(res, onEvent) {
     while ((nl = buffer.indexOf('\n')) >= 0) {
       emit(buffer.slice(0, nl))
       buffer = buffer.slice(nl + 1)
+      await yieldToBrowser()
     }
   }
   // Flush any trailing line that wasn't newline-terminated.

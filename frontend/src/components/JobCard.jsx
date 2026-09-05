@@ -171,7 +171,6 @@ function FitGauge({ score }) {
 // overrides that button's default text. Screening adds job.score / job.verdict /
 // job.matched_skills / job.missing_skills / job.reasoning, rendered when present.
 export default function JobCard({ job, onUse, selected, group, matchTag, useLabel }) {
-  const [open, setOpen] = useState(false)
   const [dupOpen, setDupOpen] = useState(false)
   const [detailsJob, setDetailsJob] = useState(null)
   const salary = salaryText(job)
@@ -287,10 +286,7 @@ export default function JobCard({ job, onUse, selected, group, matchTag, useLabe
 
       {desc ? (
         <div className="card__desc">
-          <div className={open ? 'desc desc--open' : 'desc'}>{desc}</div>
-          <button className="link-btn" onClick={() => setOpen((v) => !v)}>
-            {open ? 'Show less' : 'Show more'}
-          </button>
+          <div className="desc">{desc}</div>
         </div>
       ) : null}
 

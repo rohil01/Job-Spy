@@ -261,6 +261,7 @@ async def screen_stream(
     return StreamingResponse(
         service.stream_screen_jobs(resume_text, parsed_jobs, min_years, max_years),
         media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

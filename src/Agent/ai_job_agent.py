@@ -17,10 +17,10 @@ import os
 import json
 import re
 import importlib.util
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import sleep
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -52,7 +52,7 @@ class ScreenOutput(BaseModel):
     required_min_years: Optional[int] = Field(default=None, ge=0)
     required_max_years: Optional[int] = Field(default=None, ge=0)
     score: Optional[int] = Field(default=None, ge=0, le=100)
-    verdict: str = 'unknown'
+    verdict: Literal['strong', 'moderate', 'weak'] = 'moderate'
     matched_skills: List[str] = Field(default_factory=list)
     missing_skills: List[str] = Field(default_factory=list)
     reasoning: str = ''
@@ -76,6 +76,7 @@ class AIJobAgent:
     FILTER_MAX_WORKERS = 5
     FILTER_MAX_ATTEMPTS = 3
     FILTER_RETRY_DELAY_SECONDS = 0.25
+    INVALID_SCREENING_MESSAGE = 'The AI response did not contain a valid screening JSON object.'
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """Initialize the agent.
@@ -171,6 +172,7 @@ class AIJobAgent:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         system: Optional[str] = None,
+        json_mode: bool = False,
     ) -> str:
         """Send a single-turn chat request and return the text content.
 
@@ -195,6 +197,10 @@ class AIJobAgent:
         }
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
+        # Native OpenAI supports this parameter consistently; NVIDIA NIM
+        # compatibility varies by model and may reject the request outright.
+        if json_mode and self.ai_provider == 'openai':
+            kwargs['response_format'] = {'type': 'json_object'}
         response = self._ai_client.chat.completions.create(**kwargs)
         message = response.choices[0].message
         content = (message.content or '').strip()
@@ -345,10 +351,21 @@ class AIJobAgent:
         """Screen one job, retrying transient call failures."""
         for attempt in range(self.FILTER_MAX_ATTEMPTS):
             try:
-                return self.screen_job(job, resume_text, min_years, max_years)
+                result = self.screen_job(job, resume_text, min_years, max_years)
+                if result.get('reasoning') == self.INVALID_SCREENING_MESSAGE:
+                    raise ValueError('Invalid screening response')
+                return result
             except Exception:
                 if attempt == self.FILTER_MAX_ATTEMPTS - 1:
-                    raise
+                    return {
+                        'required_years': None,
+                        'experience_match': self.experience_matches(None, min_years, max_years),
+                        'score': None,
+                        'verdict': 'unknown',
+                        'matched_skills': [],
+                        'missing_skills': [],
+                        'reasoning': self.INVALID_SCREENING_MESSAGE,
+                    }
                 sleep(self.FILTER_RETRY_DELAY_SECONDS * (2 ** attempt))
 
         raise RuntimeError('Screening failed unexpectedly.')
@@ -374,6 +391,32 @@ class AIJobAgent:
                     [max_years] * len(jobs),
                 )
             )
+
+    def screen_jobs_parallel_stream(
+        self,
+        jobs: List[Dict[str, Any]],
+        resume_text: str,
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ):
+        """Yield completed screen results as workers finish."""
+        if not jobs:
+            return
+        workers = min(self.FILTER_MAX_WORKERS, len(jobs))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    self._screen_job_with_retry,
+                    job,
+                    resume_text,
+                    min_years,
+                    max_years,
+                ): (index, job)
+                for index, job in enumerate(jobs)
+            }
+            for future in as_completed(futures):
+                index, job = futures[future]
+                yield index, job, future.result()
 
     def filter_by_experience_years(
         self,
@@ -503,11 +546,16 @@ class AIJobAgent:
             company=job.get('company', ''),
             description=job.get('description', ''),
         )
-        raw = self._chat(prompt, temperature=0.2, max_tokens=1500)
+        raw = self._chat(
+            prompt,
+            temperature=0.0,
+            max_tokens=1500,
+            system='Return only the requested JSON object. Do not include reasoning outside JSON.',
+            json_mode=True,
+        )
         try:
             data = ScreenOutput.model_validate(self._extract_json(raw))
         except (ValueError, ValidationError):
-            # Degrade gracefully: unknown requirement never matches a set window.
             return {
                 'required_years': None,
                 'experience_match': self.experience_matches(None, min_years, max_years),
@@ -515,7 +563,7 @@ class AIJobAgent:
                 'verdict': 'unknown',
                 'matched_skills': [],
                 'missing_skills': [],
-                'reasoning': raw,
+                'reasoning': self.INVALID_SCREENING_MESSAGE,
             }
         required = self._coerce_required_years(
             data.required_min_years, data.required_max_years

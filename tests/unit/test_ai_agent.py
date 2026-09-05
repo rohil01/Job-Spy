@@ -219,7 +219,7 @@ class TestScreenJob:
         assert result['required_years'] is None
         assert result['experience_match'] is False  # unknown never matches a set window
         assert result['verdict'] == 'unknown'
-        assert result['reasoning'] == 'cannot help with that'
+        assert 'valid screening JSON' in result['reasoning']
 
 
 class TestExtractJson:

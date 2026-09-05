@@ -3,7 +3,9 @@ experience_years_prompt: |
   experience a job posting requires. Read the job title and description and
   infer the required years of experience.
 
-  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  Respond with ONLY one valid JSON object. Do not include analysis, explanations,
+  markdown, code fences, or any text before or after the JSON object. Use null for
+  an unknown upper bound and always include every key in exactly this shape:
   {{
     "min_years": <integer, minimum years of experience required, 0 if none stated>,
     "max_years": <integer or null, upper bound; use null if open-ended (e.g. "5+ years")>
@@ -28,7 +30,9 @@ suitability_prompt: |
   Job Description:
   {description}
 
-  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  Respond with ONLY one valid JSON object. Do not include analysis, explanations,
+  markdown, code fences, or any text before or after the JSON object. Always include
+  every key in exactly this shape:
   {{
     "score": <integer 0-100, overall suitability>,
     "verdict": "<strong | moderate | weak>",
@@ -39,10 +43,20 @@ suitability_prompt: |
   }}
 
 screen_prompt: |
-  You are a career coach screening a job for a candidate. In ONE pass, do two
-  things: (1) estimate how many years of professional experience the JOB
-  requires, and (2) assess how well the candidate's RESUME fits the job, paying
-  attention to required experience, skills, and domain.
+  Evaluate the job posting against the candidate resume. Return the result as
+  machine-readable JSON only.
+
+  Experience rules:
+  - Use explicit years in the job posting when available.
+  - If no years are stated, use required_min_years 0 and required_max_years null.
+  - Use null for required_max_years when the requirement is open-ended.
+  - Never put words, ranges, or explanations in numeric fields.
+
+  Scoring rules:
+  - score must be an integer from 0 through 100.
+  - verdict must be exactly one of: strong, moderate, weak.
+  - matched_skills and missing_skills must always be JSON arrays of strings.
+  - reasoning must be a short string of 2-4 sentences.
 
   Candidate Resume:
   {resume}
@@ -52,16 +66,20 @@ screen_prompt: |
   Job Description:
   {description}
 
-  Respond with ONLY a JSON object (no prose, no code fences) in exactly this shape:
+  Return exactly one JSON object. Do not return markdown, code fences, analysis,
+  headings, or any text before or after the object. Use this exact structure:
   {{
-    "required_min_years": <integer, minimum years the JOB requires, 0 if none stated>,
-    "required_max_years": <integer or null, upper bound; null if open-ended (e.g. "5+ years")>,
-    "score": <integer 0-100, overall suitability of the resume for this job>,
-    "verdict": "<strong | moderate | weak>",
-    "matched_skills": ["skills from the resume that the job wants"],
-    "missing_skills": ["skills the job wants that the resume lacks"],
-    "reasoning": "<2-4 sentence explanation of the score>"
+    "required_min_years": 0,
+    "required_max_years": null,
+    "score": 0,
+    "verdict": "weak",
+    "matched_skills": [],
+    "missing_skills": [],
+    "reasoning": "Short explanation of the fit."
   }}
+
+  Before sending your answer, check that it parses as JSON and contains all
+  seven keys. Do not output this checklist.
 
 resume_tailor_prompt: |
   You are an expert resume writer. Rewrite the candidate's resume so it is

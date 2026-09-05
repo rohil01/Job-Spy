@@ -474,21 +474,21 @@ a { color: var(--accent); }
 }
 .card__company { color: var(--muted); font-size: 13.5px; margin-top: 3px; }
 .card__loc { color: var(--muted); }
-.card__desc { margin-top: 12px; }
+.card__desc { margin-top: 12px; min-height: 0; flex: 1; overflow: hidden; }
 .desc {
   white-space: pre-wrap;
   font-size: 13px;
   color: var(--text-2);
-  max-height: 4.6em;
+  max-height: 100%;
   overflow: hidden;
   position: relative;
 }
-.desc:not(.desc--open)::after {
+.desc::after {
   content: '';
-  position: absolute; left: 0; right: 0; bottom: 0; height: 1.6em;
+  position: absolute; left: 0; right: 0; bottom: 0; height: 1.8em;
   background: linear-gradient(transparent, var(--surface));
+  pointer-events: none;
 }
-.desc--open { max-height: none; }
 .card__foot {
   display: flex; justify-content: space-between; align-items: center;
   position: absolute; left: 0; right: 0; bottom: 0;

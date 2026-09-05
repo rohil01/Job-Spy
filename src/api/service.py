@@ -304,9 +304,13 @@ def run_full_task(
 # Streaming (NDJSON) generators
 # --------------------------------------------------------------------------- #
 def _ndjson_line(payload: Dict[str, Any]) -> str:
-    """Serialize one event to a JSON-safe NDJSON line (trailing newline)."""
+    """Serialize one event as a flush-sized JSON-safe NDJSON line.
+
+    Padding is insignificant to JSON parsers but prevents browsers and small
+    HTTP buffers from holding several streamed events for one combined paint.
+    """
     safe = _json_sanitize(make_json_safe(payload))
-    return json.dumps(safe, ensure_ascii=False) + "\n"
+    return json.dumps(safe, ensure_ascii=False) + (" " * 2048) + "\n"
 
 
 def stream_scrape(overrides: Optional[Dict[str, Any]] = None):
@@ -478,37 +482,66 @@ def stream_screen_jobs(
 
         match_count = 0
         no_match_count = 0
-        results = agent.screen_jobs_parallel(jobs, resume_text, min_years, max_years)
-        if not isinstance(results, list):
-            results = [
-                agent.screen_job(job, resume_text, min_years, max_years)
-                for job in jobs
-            ]
-        for index, (job, result) in enumerate(zip(jobs, results)):
-            matched = bool(result.get("experience_match"))
-            if matched:
-                match_count += 1
-            else:
-                no_match_count += 1
-            annotated = dict(job)
-            annotated["required_years"] = result.get("required_years")
-            annotated["experience_match"] = matched
-            annotated["score"] = result.get("score")
-            annotated["verdict"] = result.get("verdict")
-            annotated["matched_skills"] = result.get("matched_skills") or []
-            annotated["missing_skills"] = result.get("missing_skills") or []
-            annotated["reasoning"] = result.get("reasoning") or ""
-            percent = round(100.0 * (index + 1) / total, 1) if total else 100.0
-            yield _ndjson_line(
-                {
-                    "type": "job",
-                    "index": index,
-                    "total": total,
-                    "percent": percent,
-                    "match": matched,
-                    "job": annotated,
-                }
+        completed = 0
+        try:
+            results = agent.screen_jobs_parallel_stream(
+                jobs, resume_text, min_years, max_years
             )
+            for index, job, result in results:
+                completed += 1
+                matched = bool(result.get("experience_match"))
+                if matched:
+                    match_count += 1
+                else:
+                    no_match_count += 1
+                annotated = dict(job)
+                annotated["required_years"] = result.get("required_years")
+                annotated["experience_match"] = matched
+                annotated["score"] = result.get("score")
+                annotated["verdict"] = result.get("verdict")
+                annotated["matched_skills"] = result.get("matched_skills") or []
+                annotated["missing_skills"] = result.get("missing_skills") or []
+                annotated["reasoning"] = result.get("reasoning") or ""
+                percent = round(100.0 * completed / total, 1) if total else 100.0
+                yield _ndjson_line(
+                    {
+                        "type": "job",
+                        "index": index,
+                        "total": total,
+                        "percent": percent,
+                        "match": matched,
+                        "job": annotated,
+                    }
+                )
+        except (AttributeError, TypeError):
+            # Keep lightweight legacy test doubles compatible with streaming.
+            for index, job in enumerate(jobs):
+                result = agent.screen_job(job, resume_text, min_years, max_years)
+                completed += 1
+                matched = bool(result.get("experience_match"))
+                if matched:
+                    match_count += 1
+                else:
+                    no_match_count += 1
+                annotated = dict(job)
+                annotated["required_years"] = result.get("required_years")
+                annotated["experience_match"] = matched
+                annotated["score"] = result.get("score")
+                annotated["verdict"] = result.get("verdict")
+                annotated["matched_skills"] = result.get("matched_skills") or []
+                annotated["missing_skills"] = result.get("missing_skills") or []
+                annotated["reasoning"] = result.get("reasoning") or ""
+                percent = round(100.0 * completed / total, 1) if total else 100.0
+                yield _ndjson_line(
+                    {
+                        "type": "job",
+                        "index": index,
+                        "total": total,
+                        "percent": percent,
+                        "match": matched,
+                        "job": annotated,
+                    }
+                )
 
         yield _ndjson_line(
             {
